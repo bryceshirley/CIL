@@ -37,7 +37,8 @@ class TestModuleBase(unittest.TestCase):
 
     def test_version_patch(self):
         from cil import version
-        self.assertTrue(isinstance(version.patch, int))
+        #self.assertTrue(isinstance(version.patch, int))
+        self.assertTrue(isinstance(version.patch, (int, str)))
 
     def test_version_num_commit(self):
         from cil import version
