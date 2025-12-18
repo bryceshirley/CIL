@@ -234,6 +234,9 @@ class TestOperator(CCPiTestClass):
         y = Id.direct(img)
         numpy.testing.assert_array_equal(y.as_array(), img.as_array())
 
+        # Check Inverse
+        x = Id.inverse(y)
+        numpy.testing.assert_array_equal(x.as_array(), img.as_array())
 
         #Check is_linear
         self.assertTrue(Id.is_linear())
