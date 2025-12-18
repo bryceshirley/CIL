@@ -120,6 +120,10 @@ class TestOperator(CCPiTestClass):
         y = D.adjoint(z)
         numpy.testing.assert_array_equal(y.as_array(), (diag*(diag*x)).as_array())
 
+        # Apply inverse and check recovery of original x
+        x_recon = D.inverse(z)
+        numpy.testing.assert_allclose(x_recon.as_array(), x.as_array(), atol=1e-7)
+
         # test norm of diagonal
         norm1 = D.norm()
         numpy.testing.assert_almost_equal(norm1, numpy.max(diag.array))
