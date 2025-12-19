@@ -243,11 +243,13 @@ class TestWavelets(CCPiTestClass):
                 W = WaveletOperator(dg, wname=wname, level=2, bnd_cond='periodization')
                 
                 # Forward then Backward
-                x_recon = W.inverse(W.direct(x))
+                x_recov = W.inverse(W.direct(x))
                 
                 # Check reconstruction precision
-                error = (x - x_recon).norm() / x.norm()
-                self.assertLess(error, 1e-7, f"Failed perfect reconstruction for {wname}")
+                # Updated Check reconstruction precision
+                M = x.norm()
+                diff_norm = (x_recov - x).norm() / M
+                self.assertAlmostEqual(diff_norm, 0, places=5, msg=f"Failed perfect reconstruction for {wname}")
 
     def test_WaveletOperator_norm(self):
         n = 64
