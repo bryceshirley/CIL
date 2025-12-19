@@ -248,6 +248,21 @@ class WaveletOperator(LinearOperator):
         else:
             out.fill(x[org_size])
             return out
+        
+    def inverse(self, Wx, out=None):
+        '''Returns the inverse discrete wavelet transform of :math:`Wx`
+
+        Parameters
+        ----------
+        Wx : DataContainer
+            Input wavelet coefficients
+        out: return DataContainer, if None a new DataContainer is returned, default None.
+
+        Returns
+        --------
+        DataContainer, the value of the inverse discrete wavelet transform of :math:`Wx` or `None` if `out`
+        '''
+        return self.adjoint(Wx, out=out)
 
     def calculate_norm(self):
         '''Returns the norm of WaveletOperator, which is equal to 1.0 if the wavelet is orthogonal
