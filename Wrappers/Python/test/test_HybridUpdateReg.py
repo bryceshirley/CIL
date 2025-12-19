@@ -30,7 +30,7 @@ Unit tests for Hybrid LSQR Regularization Parameter Selection Rules.
 import unittest
 import numpy as np
 import scipy
-from cil.optimisation.utilities.HybridUpdateReg import UpdateRegBase
+from cil.optimisation.utilities.HybridUpdateReg import UpdateRegBase, UpdateRegDiscrep
 # (
 #     UpdateRegBase, UpdateRegLcurve, UpdateRegGCV, 
 #     UpdateRegWGCV, UpdateRegDiscrepancy
@@ -61,7 +61,7 @@ class TestUpdateRegBase(unittest.TestCase):
         rule.update_regularizationparam(self.Bk, self.beta0)
 
         # Reference SVD
-        U, s, _ = scipy.linalg.svd(self.Bk, full_matrices=False)
+        U, s, _ = scipy.linalg.svd(self.Bk)
         
         # Verify singular values and projection vector
         np.testing.assert_array_almost_equal(rule.Sb, s)
@@ -70,8 +70,8 @@ class TestUpdateRegBase(unittest.TestCase):
         # Verify bounds used for optimization/plotting
         self.assertEqual(rule.Sbmax, s[0])
         self.assertEqual(rule.Sbmin, s[-1])
-        self.assertEqual(rule.reglow, 0.0)
-        self.assertEqual(rule.reghigh, s[0])
+        self.assertEqual(rule.regalpha_low, 0.0)
+        self.assertEqual(rule.regalpha_high, s[0])
 
     def test_base_state_management(self):
         '''Verify history tracking, iteration counting, and length-safety gating.'''
@@ -167,6 +167,40 @@ class TestUpdateRegBase(unittest.TestCase):
         
         self.assertEqual(len(rule.regalphavec), 2)
         np.testing.assert_array_almost_equal(rule.regalphavec, [0.5, 0.5])
+    
+    def test_projected_residual_norm_sq(self):
+        '''Verify the mathematical correctness of the residual norm calculation.'''
+        class MockRule(UpdateRegBase):
+            def _compute_next_regalpha(self): return 0.1
+            def func(self, regalpha): return 0
+
+        rule = MockRule(self.tol, self.m, self.n)
+        rule.update_regularizationparam(self.Bk, self.beta0)
+
+        # Test value for alpha
+        alpha = 0.5
+        
+        # 1. Get value from the base class method
+        calculated_res_sq = rule._projected_residual_norm_sq(alpha)
+
+        # 2. Manual calculation for comparison
+        # filter = alpha^2 / (s^2 + alpha^2)
+        filt = (alpha**2) / (rule.Sbsq + alpha**2)
+        
+        # Part 1: components within the subspace (first k elements of u1T)
+        res_subspace = np.sum(np.square(filt * (rule.beta0 * rule.u1T[:-1])))
+        
+        # Part 2: component orthogonal to the subspace (last element of u1T)
+        res_orthogonal = np.square(rule.beta0 * rule.u1T[-1])
+        
+        expected_res_sq = res_subspace + res_orthogonal
+
+        # 3. Assert equality
+        self.assertAlmostEqual(calculated_res_sq, expected_res_sq, places=12)
+        
+        # 4. Check edge case: very large alpha (should approach beta0^2)
+        large_alpha_res = rule._projected_residual_norm_sq(1e10)
+        self.assertAlmostEqual(large_alpha_res, self.beta0**2, places=5)
 
     def test_abstract_enforcement(self):
         '''Ensure UpdateRegBase cannot be instantiated without abstract methods.'''
@@ -216,3 +250,114 @@ class TestUpdateRegBase(unittest.TestCase):
         # Test non-scalar beta0
         with self.assertRaises(TypeError):
             rule.update_regularizationparam(self.Bk, beta0=[1.0, 0.0])
+
+
+def construct_noisy_beta(signal_norm, relative_noise_level):
+    '''
+    Constructs a beta0 value and an absolute noise level for testing.
+    
+    Parameters
+    ----------
+    signal_norm : float
+        The norm of the 'clean' part of the signal.
+    relative_noise_level : float
+        The percentage of noise (e.g., 0.05 for 5% noise).
+        
+    Returns
+    -------
+    beta0 : float
+        The norm of the noisy right-hand side.
+    abs_noise : float
+        The absolute norm of the noise (eta).
+    '''
+    # Absolute noise norm (eta)
+    abs_noise = relative_noise_level * signal_norm
+    
+    # In a Krylov setting, we assume the noise is orthogonal to the signal
+    # therefore: ||b||^2 = ||b_true||^2 + ||e||^2
+    beta0 = np.sqrt(signal_norm**2 + abs_noise**2)
+    
+    return beta0, abs_noise
+
+class TestUpdateRegDiscrep(unittest.TestCase):
+    def setUp(self):
+        '''Set up synthetic bidiagonal system for testing.'''
+        self.k_dim = 5
+        # Dimensions of the full problem
+        self.m, self.n = 100, 100
+        # Create a bidiagonal matrix B_k with known decay
+        self.Bk = np.zeros((self.k_dim + 1, self.k_dim))
+        np.fill_diagonal(self.Bk, [10, 5, 2, 1, 0.5])
+        np.fill_diagonal(self.Bk[1:], [4, 2, 1, 0.4])
+        
+        self.beta0 = 1.0
+        self.tol = 1e-3
+    
+    def test_discrepancy_monotonicity(self):
+        '''Verify that alpha is a monotonically increasing function of noise.'''
+        noises = [0.1, 0.2, 0.3, 0.4]
+        alphas = []
+        
+        for n in noises:
+            rule = UpdateRegDiscrep(self.tol, self.m, self.n, n)
+            rule.update_regularizationparam(self.Bk, self.beta0)
+            alphas.append(rule.regalpha)
+            self.assertGreater(rule.regalpha, 0.0)
+            
+        # Check that alphas are strictly increasing
+        for i in range(len(alphas) - 1):
+            self.assertLess(alphas[i], alphas[i+1], 
+                           f"Alpha should increase with noise. Failed at index {i}")
+    
+    def test_zero_noise_limit(self):
+        '''Verify that if noise level is below reachable residual, alpha is 0.'''
+        # Set noise to 0.0
+        rule = UpdateRegDiscrep(self.tol, self.m, self.n, discrep_noise_level=0.0)
+        rule.update_regularizationparam(self.Bk, self.beta0)
+        
+        # The logic should realize that the residual at alpha=0 
+        # is already > 0.0, so it should return the lower bound.
+        self.assertEqual(rule.regalpha, 0.0, 
+                         "Should return alpha_low (0.0) when noise is unreachable.")
+    
+    def test_residual_at_root(self):
+        '''Verify that the residual at the selected alpha matches the noise level.'''
+        noise = 0.3
+        rule = UpdateRegDiscrep(self.tol, self.m, self.n, discrep_noise_level=noise)
+        rule.update_regularizationparam(self.Bk, self.beta0)
+        
+        # func(alpha) should be ~0, meaning residual^2 - noise^2 = 0
+        self.assertAlmostEqual(rule.func(rule.regalpha), 0.0, places=6)
+    
+    def test_discrepancy_mathematical_recalculation(self):
+        '''Verify that the identified alpha satisfies the Discrepancy Principle.'''
+        noise_level = 0.25
+        rule = UpdateRegDiscrep(self.tol, self.m, self.n, noise_level)
+        rule.update_regularizationparam(self.Bk, self.beta0)
+        
+        alpha = rule.regalpha
+        # Manual math check:
+        filt = (alpha**2) / (rule.Sbsq + alpha**2)
+        
+        # rule.Sbsq is length k, rule.u1T[:-1] is length k.
+        residual_sq = np.sum(np.square(filt * (rule.beta0 * rule.u1T[:-1]))) + \
+                      np.square(rule.beta0 * rule.u1T[-1])
+        
+        self.assertAlmostEqual(np.sqrt(residual_sq), noise_level, places=5)
+    
+    def test_discrepancy_with_constructed_noise(self):
+        '''Mathematical verification with a controlled noise-to-signal ratio.'''
+        signal_norm = 1.0
+        rel_noise = 0.1  # 10% noise
+        
+        beta0, noise_level = construct_noisy_beta(signal_norm, rel_noise)
+        
+        rule = UpdateRegDiscrep(self.tol, self.m, self.n, noise_level)
+        
+        rule.update_regularizationparam(self.Bk, beta0)
+        
+        # Verification: Residual norm at selected alpha should match noise_level
+        # We check the square to avoid sqrt computation in the test
+        residual_sq = rule.func(rule.regalpha) + noise_level**2
+        
+        self.assertAlmostEqual(np.sqrt(residual_sq), noise_level, places=5)

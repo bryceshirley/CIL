@@ -29,7 +29,7 @@ class UpdateRegBase(ABC):
         self.n = n
         self.tol = regalpha_saturation_tol
         
-        self.regalpha = None
+        self.regalpha = 0.0
         self.regalphavec = np.array([])
         self.converged = False
         self.iteration = 0
@@ -59,12 +59,17 @@ class UpdateRegBase(ABC):
         if not np.isscalar(beta0):
              raise TypeError(f"beta0 must be a scalar norm, got {type(beta0)}")
 
+        # Update iteration count
         self.iteration = Bk.shape[1]
+        self.beta0= beta0
+
+        # Compute SVD components of Bk
         self._compute_svd(Bk)
-        self.beta = beta0
         
+        # Compute the next regularization parameter
         new_regalpha = self._compute_next_regalpha()
         
+        # Update state if a new regularization parameter is found
         if new_regalpha is not None:
             self.regalpha = new_regalpha
             self.regalphavec = np.append(self.regalphavec, new_regalpha)
@@ -85,6 +90,19 @@ class UpdateRegBase(ABC):
     def plot_function(self):
         '''Utility to plot the rule-specific function over a range of alphas.'''
         print("Plotting function not implemented")
+    
+    def _projected_residual_norm_sq(self, reg):
+        """Common logic for the squared projected residual norm."""
+        # filt = alpha^2 / (s^2 + alpha^2)
+        filt = (reg**2) / (self.Sbsq + reg**2)
+        
+        # Contribution from the subspace singular values
+        r1 = np.sum(np.square(filt * (self.beta0 * self.u1T.T[:-1])))
+        
+        # Contribution from the component orthogonal to the subspace
+        r2 = np.square(self.beta0 * self.u1T.T[-1])
+        
+        return r1 + r2
 
     def _run_convergence_checks(self):
         '''Standard convergence check based on the saturation of alpha.
@@ -129,7 +147,7 @@ class UpdateRegBase(ABC):
 
     def _compute_svd(self, Bk):
         '''Computes the SVD components for the projection matrix Bk.'''
-        Ub, Sb, _ = scipy.linalg.svd(Bk, full_matrices=False)
+        Ub, Sb, _ = scipy.linalg.svd(Bk)
         self.Sb = Sb
         self.Sbsq = np.square(Sb)
         self.u1T = Ub[0, :]
@@ -137,10 +155,109 @@ class UpdateRegBase(ABC):
         self.Sbmin = Sb[-1]
 
         # Set regalpha bounds for plotting and optimization/root-finding
-        self.reglow = 0.0
-        self.reghigh = self.Sbmax
+        self.regalpha_low = 0.0
+        self.regalpha_high = self.Sbmax
 
     def _print_status(self):
         '''Prints the current iteration status to the console.'''
         val = f"{self.regalpha:.4e}" if self.regalpha else "N/A"
         print(f"Iteration {self.iteration}: regalpha = {val} [{self.rule_type.upper()}]")
+    
+
+class UpdateRegDiscrep(UpdateRegBase):
+    r"""Discrepancy Principle for choosing the regularisation parameter :math:`\alpha`.
+
+    The algorithm finds the root :math:`\alpha` of the discrepancy function:
+
+    .. math:: \phi(\alpha) = \|r_{\alpha}\|_2^2 - \eta^2 = 0
+
+    where :math:`\eta` is the :code:`discrep_noise_level`.
+
+    In the :math:`k`-th Krylov subspace, the residual norm is computed using the SVD 
+    of the bidiagonal matrix :math:`B_k = U \Sigma V^T`:
+
+    .. math:: \|r_\alpha\|_2^2 = \sum_{i=1}^{k} \left( \frac{\alpha^2}{s_i^2 + \alpha^2} \beta \hat{u}_i \right)^2 + (\beta \hat{u}_{k+1})^2
+
+    where:
+
+    * :math:`s_i` are the singular values of :math:`B_k`.
+    * :math:`\beta` is the norm of the initial right-hand side vector :math:`b`.
+    * :math:`\hat{u}_i` is the :math:`i`-th element of the first row of :math:`U`.
+    * The last term :math:`(\beta \hat{u}_{k+1})^2` is the residual component orthogonal to the current Krylov subspace.
+
+    Parameters
+    ----------
+    regalpha_saturation_tol : float
+        Relative tolerance for convergence of the regularisation parameter.
+    m : int
+        Number of rows in the forward operator :math:`A`.
+    n : int
+        Number of columns in the forward operator :math:`A`.
+    discrep_noise_level : float
+        The estimated norm of the noise in the right-hand side, :math:`\eta = \|e\|_2`.
+
+    Note
+    ----
+    The discrepancy principle requires an accurate estimate of the noise level. 
+    If :math:`\eta` is underestimated, the solution may be under-regularised; 
+    if overestimated, the solution will be over-smoothed.
+
+    """
+
+    def __init__(self, regalpha_saturation_tol, m, n, discrep_noise_level):
+        super().__init__(regalpha_saturation_tol, m, n)
+        self.rule_type = "discrep"
+        self.noise_level = discrep_noise_level
+    
+    def _compute_next_regalpha(self):
+        """Finds alpha such that ||r_alpha|| = noise_level using Brent's method."""
+        # Bracket the root: lo=0 (least smoothing), hi=large (most smoothing)
+        f_lo, f_hi = self.func(self.regalpha_low), self.func(self.regalpha_high)
+
+        # If f_lo > 0, it means even with zero smoothing (alpha=0), 
+        # the residual is ALREADY larger than the noise level.
+        if f_lo > 0:
+            return self.regalpha_low # Return 0.0
+
+        # If f_hi < 0, it means even with max smoothing, 
+        # the residual is smaller than the noise level.
+        if f_hi < 0:
+            return self.regalpha_high
+
+        result = scipy.optimize.root_scalar(
+            self.func, bracket=[self.regalpha_low, self.regalpha_high], method="brentq"
+        )
+
+        return result.root if result.converged else self.regalpha
+
+    def func(self, regalpha):
+        """Discrepancy function: phi(alpha) = ||r_alpha||^2 - noise^2."""
+        return self._projected_residual_norm_sq(regalpha) - self.noise_level**2
+    
+    def plot_function(self):
+        """
+        Plot the discrepancy function stored from the last evaluation.
+        Call this after an iteration that used rule='discrepancy'.
+        We need to see where it crosses zero.
+        """
+        regalpha_grid = np.geomspace(self.regalpha_low, self.regalpha_high, 80)
+        funcvec = np.array([self.func(reg) for reg in regalpha_grid])
+
+        plt.figure()
+        plt.semilogx(
+            regalpha_grid, funcvec
+        )  # semi-log plot to see zero crossing better
+        plt.axhline(0, color="gray", linestyle="--")
+        plt.xlabel("Regularisation parameter")
+        plt.ylabel("Discrepancy function")
+        plt.title("Discrepancy function vs regularisation parameter")
+        if self.regalpha is not None:
+            plt.axvline(
+                self.regalpha,
+                color="r",
+                linestyle="--",
+                label=f"Selected alpha: {self.regalpha:.2e}",
+            )
+        plt.legend()
+        plt.grid()
+        plt.show()
