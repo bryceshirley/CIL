@@ -61,6 +61,14 @@ class DiagonalOperator(LinearOperator):
         "Returns :math:`D^*\circ x` "
         return self.diagonal.conjugate().multiply(x,out=out)
 
+    def inverse(self, x, out=None):
+        "Returns :math:`D^{-1}\circ x`"
+        if out is None:
+            return (1 / self.diagonal) * x
+        else:
+            (1 / self.diagonal).multiply(x, out=out)
+        return out
+
     def calculate_norm(self, **kwargs):
         r""" Returns the operator norm of DiagonalOperator which is the :math:`\infty` norm of `diagonal`
 
