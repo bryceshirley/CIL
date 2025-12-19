@@ -69,6 +69,7 @@ class TestUpdateRegBase(unittest.TestCase):
         
         # Verify bounds used for optimization/plotting
         self.assertEqual(rule.Sbmax, s[0])
+        self.assertEqual(rule.Sbmin, s[-1])
         self.assertEqual(rule.reglow, 0.0)
         self.assertEqual(rule.reghigh, s[0])
 

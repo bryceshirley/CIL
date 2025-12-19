@@ -134,6 +134,7 @@ class UpdateRegBase(ABC):
         self.Sbsq = np.square(Sb)
         self.u1T = Ub[0, :]
         self.Sbmax = Sb[0]
+        self.Sbmin = Sb[-1]
 
         # Set regalpha bounds for plotting and optimization/root-finding
         self.reglow = 0.0
