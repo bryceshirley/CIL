@@ -35,41 +35,225 @@ from cil.optimisation.utilities.HybridUpdateReg import (
     UpdateRegLcurve, UpdateRegGCV
 )
 
-class TestUpdateRegBase(unittest.TestCase):
-    def setUp(self):
-        '''Set up synthetic bidiagonal system for testing.'''
+class RegRuleInfrastructureTestsMixin:
+    """
+    Mixin providing common infrastructure tests. 
+    Expects inheriting classes to run 
+    setup_bidiagonal_system method in their setUp(),
+    for a given RuleClass.
+    """
+
+    def setup_bidiagonal_system(self, RuleClass):
+        """
+        Standardizes the creation of the test system across all rules.
+        Call this inside the child class setUp().
+        """
         self.k_dim = 5
-        # Dimensions of the full problem
         self.m, self.n = 100, 100
+        self.beta0 = 1.0
+        self.tol = 1e-3
+        
         # Create a bidiagonal matrix B_k with known decay
         self.Bk = np.zeros((self.k_dim + 1, self.k_dim))
         np.fill_diagonal(self.Bk, [10, 5, 2, 1, 0.5])
         np.fill_diagonal(self.Bk[1:], [4, 2, 1, 0.4])
-        
-        self.beta0 = 1.0
-        self.tol = 1e-3
-    
+
+        self.RuleClass = RuleClass
+        self.default_rule = self.RuleClass(self.tol, self.m, self.n)
+        self.default_rule._compute_svd(self.Bk)
+        self.default_rule.beta0 = self.beta0
+
     def test_svd_extraction(self):
         '''Verify SVD components are correctly computed and stored.'''
-        class MockRule(UpdateRegBase):
-            def _compute_next_regalpha(self): return 0.1
-            def func(self, regalpha): return 0
-
-        rule = MockRule(self.tol, self.m, self.n)
-        rule.update_regularizationparam(self.Bk, self.beta0)
+        self.default_rule.update_regularizationparam(self.Bk, self.beta0)
 
         # Reference SVD
         U, s, _ = scipy.linalg.svd(self.Bk)
         
         # Verify singular values and projection vector
-        np.testing.assert_array_almost_equal(rule.Sb, s)
-        np.testing.assert_array_almost_equal(rule.u1T, U[0, :]) 
+        np.testing.assert_array_almost_equal(self.default_rule.Sb, s)
+        np.testing.assert_array_almost_equal(self.default_rule.u1T, U[0, :]) 
         
         # Verify bounds used for optimization/plotting
-        self.assertEqual(rule.Sbmax, s[0])
-        self.assertEqual(rule.Sbmin, s[-1])
-        self.assertEqual(rule.regalpha_low, 0.0)
-        self.assertEqual(rule.regalpha_high, s[0])
+        self.assertEqual(self.default_rule.Sbmax, s[0])
+        self.assertEqual(self.default_rule.Sbmin, s[-1])
+        self.assertEqual(self.default_rule.regalpha_low, 0.0)
+        self.assertEqual(self.default_rule.regalpha_high, s[0])
+
+    def test_numerical_stability_zeros(self):
+        '''Verify that the safety EPS handles zero/static values without crashing.'''        
+        # Test 1: Identical values [1, 1]
+        self.default_rule.regalpha_history = [1.0, 1.0]
+        self.default_rule.converged = False
+        self.default_rule._run_convergence_checks()
+        self.assertTrue(self.default_rule.converged, "Static values should trigger convergence.")
+
+        # Test 2: All zeros (Potential underflow)
+        self.default_rule.regalpha_history = [0.0, 0.0]
+        self.default_rule.converged = False
+        self.default_rule._run_convergence_checks()
+        self.assertTrue(self.default_rule.converged, "Zero values should handle EPS safely.")
+    
+    def test_convergence_logic(self):
+        '''Verify convergence logic based on relative change in regalpha.'''
+        tol = 0.1
+        rule = self.RuleClass(tol, self.m, self.n)
+
+        # Condition : |a[-1] - a[-2]| / (|a[-1]| + EPS) < tol
+        rule.converged = False
+        scenarios = [
+            ([1.0, 1.05], True, "Within tol (5% change)"),
+            ([1.0, 1.25], False, "Outside tol (25% change)"),
+            ([0.0, 0.1], False, "From zero to non-zero"), 
+            ([0.1, 0.100000001], True, "Stabilized near zero"),
+            ([1.0, 0.95], True, "Decreased within tol")
+        ]
+        for values, expected, msg in scenarios:
+            rule.regalpha_history = values
+            rule.converged = False
+            rule._run_convergence_checks()
+            self.assertEqual(rule.converged, expected, msg)
+
+    def test_print_status_formatting(self):
+        '''Ensure status printing handles None regalpha gracefully.'''
+        # Should not raise error
+        self.default_rule._print_status()
+    
+    def test_projected_residual_norm_sq(self):
+        '''Verify the mathematical correctness of the residual norm calculation.'''
+        self.default_rule.update_regularizationparam(self.Bk, self.beta0)
+
+        # Test value for alpha
+        alpha = 0.5
+        
+        # 1. Get value from the base class method
+        calculated_res_sq = self.default_rule._projected_residual_norm_sq(alpha)
+
+        # 2. Manual calculation for comparison
+        # filter = alpha^2 / (s^2 + alpha^2)
+        filt = (alpha**2) / (self.default_rule.Sbsq + alpha**2)
+        
+        # Part 1: components within the subspace (first k elements of u1T)
+        res_subspace = np.sum(np.square(filt * (self.default_rule.beta0 * self.default_rule.u1T[:-1])))
+        
+        # Part 2: component orthogonal to the subspace (last element of u1T)
+        res_orthogonal = np.square(self.default_rule.beta0 * self.default_rule.u1T[-1])
+        
+        expected_res_sq = res_subspace + res_orthogonal
+
+        # 3. Assert equality
+        self.assertAlmostEqual(calculated_res_sq, expected_res_sq, places=12)
+        
+        # 4. Check edge case: very large alpha (should approach beta0^2)
+        large_alpha_res = self.default_rule._projected_residual_norm_sq(1e10)
+        self.assertAlmostEqual(large_alpha_res, self.default_rule.beta0**2, places=5)
+    
+    def test_projected_solution_norm_sq(self):
+        '''Verify the mathematical correctness of the solution norm calculation.'''
+        self.default_rule.update_regularizationparam(self.Bk, self.beta0)
+
+        # Test value for alpha
+        alpha = 0.5
+        
+        # 1. Get value from the base class method
+        calculated_sol_sq = self.default_rule._projected_solution_norm_sq(alpha)
+
+        # 2. Manual calculation for comparison
+        # filter = sigma / (sigma^2 + alpha^2)
+        filt = self.default_rule.Sb / (self.default_rule.Sbsq + alpha**2)
+        
+        # The solution exists strictly within the k-dimensional subspace.
+        # It uses the first k elements of the projected RHS (u1T[:-1]).
+        expected_sol_sq = np.sum(np.square(filt * (self.default_rule.beta0 * self.default_rule.u1T[:-1])))
+        # 3. Assert equality
+        self.assertAlmostEqual(calculated_sol_sq, expected_sol_sq, places=12)
+        
+        # 4. Check edge case: very large alpha
+        # As alpha -> infinity, the solution norm should approach 0.
+        large_alpha_sol = self.default_rule._projected_solution_norm_sq(1e10)
+        self.assertAlmostEqual(large_alpha_sol, 0.0, places=15)
+
+        # 5. Check edge case: alpha = 0 (Unregularized least squares)
+        # Should match sum( (beta_hat_i / sigma_i)^2 )
+        zero_alpha_sol = self.default_rule._projected_solution_norm_sq(0.0)
+        manual_least_squares = np.sum(np.square((self.default_rule.beta0 * self.default_rule.u1T[:-1]) / self.default_rule.Sb))
+        self.assertAlmostEqual(zero_alpha_sol, manual_least_squares, places=12)
+    
+    def test_invalid_initialization(self):
+        '''Verify that __init__ rejects non-positive dimensions and tolerances.'''
+
+        # Test negative/zero dimensions
+        with self.assertRaises(ValueError):
+            self.RuleClass(regalpha_saturation_tol=1e-3, m=0, n=100)
+        with self.assertRaises(ValueError):
+            self.RuleClass(regalpha_saturation_tol=1e-3, m=100, n=-5)
+        
+        # Test non-positive tolerance
+        with self.assertRaises(ValueError):
+            self.RuleClass(regalpha_saturation_tol=0, m=100, n=100)
+        with self.assertRaises(ValueError):
+            self.RuleClass(regalpha_saturation_tol=-1e-4, m=100, n=100)
+
+    def test_invalid_update_inputs(self):
+        '''Verify that update_regularizationparam rejects inconsistent matrix shapes and types.'''
+
+        # Test non-ndarray Bk
+        with self.assertRaises(TypeError):
+            self.default_rule.update_regularizationparam(Bk=[[1, 0], [0, 1]], beta0=1.0)
+        # Test Bk that isn't (k+1, k)
+        invalid_shape_Bk = np.eye(self.k_dim) # (5, 5) instead of (6, 5)
+        with self.assertRaises(ValueError):
+            self.default_rule.update_regularizationparam(invalid_shape_Bk, self.beta0)
+        # Test Bk exceeding operator dimensions
+        huge_Bk = np.zeros((self.m + 2, self.m + 1))
+        with self.assertRaises(ValueError):
+            self.default_rule.update_regularizationparam(huge_Bk, self.beta0)
+        # Test non-scalar beta0
+        with self.assertRaises(TypeError):
+            self.default_rule.update_regularizationparam(self.Bk, beta0=[1.0, 0.0])
+    
+    def test_interface_return_signature(self):
+        '''Verify _compute_next_regalpha returns either a float or a (float, float) tuple.'''
+        result = self.default_rule._compute_next_regalpha()
+        
+        if isinstance(result, (tuple, list)):
+            self.assertEqual(len(result), 2, "If returning a tuple, it must have 2 elements.")
+            alpha, val = result
+            # Check for (float, float), (None, None), or mixed
+            self.assertTrue(alpha is None or np.isscalar(alpha), "Alpha part of tuple must be None or scalar.")
+            self.assertTrue(val is None or np.isscalar(val), "Func part of tuple must be None or scalar.")
+        else:
+            # Check for float or None
+            self.assertTrue(result is None or np.isscalar(result), "Single return value must be None or scalar.")
+    
+    def test_plot_history_error_handling(self):
+        '''Verify ValueError is raised when trying to plot empty history.'''
+        rule = self.default_rule
+        
+        # Ensure history is empty
+        rule.regalpha_history = []
+        rule.func_history = []
+
+        # 1. Test completely empty history
+        with self.assertRaisesRegex(ValueError, "No regularization parameter history"):
+            rule.plot_history(show_objective=False)
+
+        # 2. Test missing objective history specifically
+        # Manually add to regalpha but keep func_history empty
+        rule.regalpha_history = [0.1, 0.2]
+        with self.assertRaisesRegex(ValueError, "No function history available"):
+            rule.plot_history(show_objective=True)
+
+class TestUpdateRegBase(unittest.TestCase, RegRuleInfrastructureTestsMixin):
+    """
+    Unit tests for the Base Class of Hybrid LSQR Regularization Parameter Selection Rules.
+    """
+    def setUp(self):
+        '''Set up synthetic bidiagonal system for testing.'''
+        class MockRule(UpdateRegBase):
+            def _compute_next_regalpha(self): return 0.1, 0.0
+            def func(self, regalpha): return 0.0
+        self.setup_bidiagonal_system(RuleClass=MockRule)
 
     def test_base_state_management(self):
         '''Verify history tracking, iteration counting, and length-safety gating.'''
@@ -86,8 +270,8 @@ class TestUpdateRegBase(unittest.TestCase):
         rule.update_regularizationparam(self.Bk, self.beta0)
         
         self.assertEqual(rule.iteration, self.k_dim)
-        self.assertEqual(len(rule.regalphavec), 1)
-        self.assertAlmostEqual(rule.regalphavec[0], 0.1)
+        self.assertEqual(len(rule.regalpha_history), 1)
+        self.assertAlmostEqual(rule.regalpha_history[0], 0.1)
 
         # 2. Test safety gate for short history
         # With only one alpha, _run_convergence_checks should exit silently
@@ -97,194 +281,47 @@ class TestUpdateRegBase(unittest.TestCase):
 
         # 3. Test multiple appends
         rule.update_regularizationparam(self.Bk, self.beta0)
-        self.assertEqual(len(rule.regalphavec), 2)
-
-    def test_numerical_stability_zeros(self):
-        '''Verify that the safety EPS handles zero/static values without crashing.'''
-        class MockRule(UpdateRegBase):
-            def _compute_next_regalpha(self): return 1.0
-            def func(self, regalpha): return 0
-        rule = MockRule(self.tol, self.m, self.n)
-        
-        # Test 1: Identical values [1, 1]
-        rule.regalphavec = np.array([1.0, 1.0])
-        rule.converged = False
-        rule._run_convergence_checks()
-        self.assertTrue(rule.converged, "Static values should trigger convergence.")
-
-        # Test 2: All zeros (Potential underflow)
-        rule.regalphavec = np.array([0.0, 0.0])
-        rule.converged = False
-        rule._run_convergence_checks()
-        self.assertTrue(rule.converged, "Zero values should handle EPS safely.")
-    
-    def test_convergence_logic(self):
-        '''Verify convergence logic based on relative change in regalpha.'''
-        class MockRule(UpdateRegBase):
-            def _compute_next_regalpha(self): return 1.0
-            def func(self, regalpha): return 0
-        tol = 0.1
-        rule = MockRule(tol, self.m, self.n)
-
-        # Condition : |a[-1] - a[-2]| / (|a[-1]| + EPS) < tol
-        rule.converged = False
-        scenarios = [
-            ([1.0, 1.05], True, "Within tol (5% change)"),
-            ([1.0, 1.25], False, "Outside tol (25% change)"),
-            ([0.0, 0.1], False, "From zero to non-zero"), 
-            ([0.1, 0.100000001], True, "Stabilized near zero"),
-            ([1.0, 0.95], True, "Decreased within tol")
-        ]
-        for values, expected, msg in scenarios:
-            rule.regalphavec = np.array(values)
-            rule.converged = False
-            rule._run_convergence_checks()
-            self.assertEqual(rule.converged, expected, msg)
-
-    def test_print_status_formatting(self):
-        '''Ensure status printing handles None regalpha gracefully.'''
-        class MockRule(UpdateRegBase):
-            def _compute_next_regalpha(self): return None
-            def func(self, regalpha): return 0
-            
-        rule = MockRule(self.tol, self.m, self.n)
-        # Should not raise error
-        rule._print_status()
+        self.assertEqual(len(rule.regalpha_history), 2)
     
     def test_history_tracking(self):
-        '''Verify regalphavec correctly appends new values via the parent method.'''
+        '''Verify regalpha_history and func_history correctly append via parent method.'''
+        # We use a Mock here to control the returns exactly, 
+        # independent of the specific rule's math.
         class MockRule(UpdateRegBase):
-            def _compute_next_regalpha(self): return 0.1 * self.iteration
-            def func(self, regalpha): return 0
+            def _compute_next_regalpha(self): 
+                # Return (alpha, func_val)
+                # alpha based on iteration, func_val as a fixed test value
+                return 0.1 * self.iteration, 99.0
+            def func(self, regalpha): return 99.0
 
         rule = MockRule(self.tol, self.m, self.n)
         
-        # Call update twice
-        rule.update_regularizationparam(self.Bk, self.beta0) # k=5
-        rule.update_regularizationparam(self.Bk, self.beta0) # k=5 (simulated)
-        
-        self.assertEqual(len(rule.regalphavec), 2)
-        np.testing.assert_array_almost_equal(rule.regalphavec, [0.5, 0.5])
-    
-    def test_projected_residual_norm_sq(self):
-        '''Verify the mathematical correctness of the residual norm calculation.'''
-        class MockRule(UpdateRegBase):
-            def _compute_next_regalpha(self): return 0.1
-            def func(self, regalpha): return 0
-
-        rule = MockRule(self.tol, self.m, self.n)
+        # Iteration 1: Bk.shape[1] is 5, so alpha = 0.5, func = 99.0
         rule.update_regularizationparam(self.Bk, self.beta0)
-
-        # Test value for alpha
-        alpha = 0.5
         
-        # 1. Get value from the base class method
-        calculated_res_sq = rule._projected_residual_norm_sq(alpha)
-
-        # 2. Manual calculation for comparison
-        # filter = alpha^2 / (s^2 + alpha^2)
-        filt = (alpha**2) / (rule.Sbsq + alpha**2)
-        
-        # Part 1: components within the subspace (first k elements of u1T)
-        res_subspace = np.sum(np.square(filt * (rule.beta0 * rule.u1T[:-1])))
-        
-        # Part 2: component orthogonal to the subspace (last element of u1T)
-        res_orthogonal = np.square(rule.beta0 * rule.u1T[-1])
-        
-        expected_res_sq = res_subspace + res_orthogonal
-
-        # 3. Assert equality
-        self.assertAlmostEqual(calculated_res_sq, expected_res_sq, places=12)
-        
-        # 4. Check edge case: very large alpha (should approach beta0^2)
-        large_alpha_res = rule._projected_residual_norm_sq(1e10)
-        self.assertAlmostEqual(large_alpha_res, self.beta0**2, places=5)
-    
-    def test_projected_solution_norm_sq(self):
-        '''Verify the mathematical correctness of the solution norm calculation.'''
-        class MockRule(UpdateRegBase):
-            def _compute_next_regalpha(self): return 0.1
-            def func(self, regalpha): return 0
-
-        rule = MockRule(self.tol, self.m, self.n)
+        # Iteration 2: Simulate second call
         rule.update_regularizationparam(self.Bk, self.beta0)
-
-        # Test value for alpha
-        alpha = 0.5
         
-        # 1. Get value from the base class method
-        calculated_sol_sq = rule._projected_solution_norm_sq(alpha)
-
-        # 2. Manual calculation for comparison
-        # filter = sigma / (sigma^2 + alpha^2)
-        filt = rule.Sb / (rule.Sbsq + alpha**2)
+        # 1. Check alpha history
+        self.assertEqual(len(rule.regalpha_history), 2)
+        np.testing.assert_array_almost_equal(rule.regalpha_history, [0.5, 0.5])
         
-        # The solution exists strictly within the k-dimensional subspace.
-        # It uses the first k elements of the projected RHS (u1T[:-1]).
-        expected_sol_sq = np.sum(np.square(filt * (rule.beta0 * rule.u1T[:-1])))
-
-        # 3. Assert equality
-        self.assertAlmostEqual(calculated_sol_sq, expected_sol_sq, places=12)
+        # 2. Check function value history
+        self.assertEqual(len(rule.func_history), 2)
+        np.testing.assert_array_almost_equal(rule.func_history, [99.0, 99.0])
         
-        # 4. Check edge case: very large alpha
-        # As alpha -> infinity, the solution norm should approach 0.
-        large_alpha_sol = rule._projected_solution_norm_sq(1e10)
-        self.assertAlmostEqual(large_alpha_sol, 0.0, places=15)
+        # 3. Check current state matches last entry
+        self.assertEqual(rule.regalpha, 0.5)
 
-        # 5. Check edge case: alpha = 0 (Unregularized least squares)
-        # Should match sum( (beta_hat_i / sigma_i)^2 )
-        zero_alpha_sol = rule._projected_solution_norm_sq(0.0)
-        manual_least_squares = np.sum(np.square((rule.beta0 * rule.u1T[:-1]) / rule.Sb))
-        self.assertAlmostEqual(zero_alpha_sol, manual_least_squares, places=12)
-
-    def test_abstract_enforcement(self):
-        '''Ensure UpdateRegBase cannot be instantiated without abstract methods.'''
-        with self.assertRaises(TypeError):
-            UpdateRegBase('base', 1e-3, 10, 10)
-    
-    def test_invalid_initialization(self):
-        '''Verify that __init__ rejects non-positive dimensions and tolerances.'''
-        class MockRule(UpdateRegBase):
-            def _compute_next_regalpha(self): return 0.1
+        class MockAlphaOnly(UpdateRegBase):
+            def _compute_next_regalpha(self): return 0.1, None
             def func(self, regalpha): return 0
 
-        # Test negative/zero dimensions
-        with self.assertRaises(ValueError):
-            MockRule(regalpha_saturation_tol=1e-3, m=0, n=100)
-        with self.assertRaises(ValueError):
-            MockRule(regalpha_saturation_tol=1e-3, m=100, n=-5)
+        rule = MockAlphaOnly(self.tol, self.m, self.n)
+        rule.update_regularizationparam(self.Bk, self.beta0)
         
-        # Test non-positive tolerance
-        with self.assertRaises(ValueError):
-            MockRule(regalpha_saturation_tol=0, m=100, n=100)
-        with self.assertRaises(ValueError):
-            MockRule(regalpha_saturation_tol=-1e-4, m=100, n=100)
-
-    def test_invalid_update_inputs(self):
-        '''Verify that update_regularizationparam rejects inconsistent matrix shapes and types.'''
-        class MockRule(UpdateRegBase):
-            def _compute_next_regalpha(self): return 0.1
-            def func(self, regalpha): return 0
-
-        rule = MockRule(self.tol, self.m, self.n)
-
-        # Test non-ndarray Bk
-        with self.assertRaises(TypeError):
-            rule.update_regularizationparam(Bk=[[1, 0], [0, 1]], beta0=1.0)
-
-        # Test Bk that isn't (k+1, k)
-        invalid_shape_Bk = np.eye(self.k_dim) # (5, 5) instead of (6, 5)
-        with self.assertRaises(ValueError):
-            rule.update_regularizationparam(invalid_shape_Bk, self.beta0)
-
-        # Test Bk exceeding operator dimensions
-        huge_Bk = np.zeros((self.m + 2, self.m + 1))
-        with self.assertRaises(ValueError):
-            rule.update_regularizationparam(huge_Bk, self.beta0)
-
-        # Test non-scalar beta0
-        with self.assertRaises(TypeError):
-            rule.update_regularizationparam(self.Bk, beta0=[1.0, 0.0])
+        self.assertEqual(len(rule.regalpha_history), 1)
+        self.assertEqual(len(rule.func_history), 0, "func_history should stay empty if None is returned.")
 
 
 def construct_noisy_beta(signal_norm, relative_noise_level):
@@ -314,19 +351,10 @@ def construct_noisy_beta(signal_norm, relative_noise_level):
     
     return beta0, abs_noise
 
-class TestUpdateRegDiscrep(unittest.TestCase):
+class TestUpdateRegDiscrep(unittest.TestCase, RegRuleInfrastructureTestsMixin):
     def setUp(self):
         '''Set up synthetic bidiagonal system for testing.'''
-        self.k_dim = 5
-        # Dimensions of the full problem
-        self.m, self.n = 100, 100
-        # Create a bidiagonal matrix B_k with known decay
-        self.Bk = np.zeros((self.k_dim + 1, self.k_dim))
-        np.fill_diagonal(self.Bk, [10, 5, 2, 1, 0.5])
-        np.fill_diagonal(self.Bk[1:], [4, 2, 1, 0.4])
-        
-        self.beta0 = 1.0
-        self.tol = 1e-3
+        self.setup_bidiagonal_system(RuleClass=UpdateRegDiscrep)
     
     def test_discrepancy_monotonicity(self):
         '''Verify that alpha is a monotonically increasing function of noise.'''
@@ -397,7 +425,7 @@ class TestUpdateRegDiscrep(unittest.TestCase):
         
         self.assertAlmostEqual(np.sqrt(residual_sq), noise_level, places=5)
 
-class TestUpdateRegLcurve(unittest.TestCase):
+class TestUpdateRegLcurve(unittest.TestCase, RegRuleInfrastructureTestsMixin):
     """
     Unit tests for the L-Curve Regularization Parameter Selection Rule.
     
@@ -413,8 +441,8 @@ class TestUpdateRegLcurve(unittest.TestCase):
     """
 
     def setUp(self):
-        """Set up a bidiagonal matrix with exponential singular value decay."""
-        pass
+        '''Set up synthetic bidiagonal system for testing.'''
+        self.setup_bidiagonal_system(RuleClass=UpdateRegLcurve)
 
     def test_curvature_peak_finding(self):
         """
