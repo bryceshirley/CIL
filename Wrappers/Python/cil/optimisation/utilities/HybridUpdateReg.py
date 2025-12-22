@@ -29,11 +29,18 @@ class UpdateRegBase(ABC):
         self.n = n
         self.tol = regalpha_saturation_tol
         
+        # History and state variables
         self.regalpha = 0.0
-        self.regalphavec = np.array([])
+        self.regalpha_history = [] # History of regularization parameters
+        self.func_history = [] # History of function values
+
         self.converged = False
         self.iteration = 0
         self.EPS = 1e-15 
+
+        # Bounds Based on SVD of Bk
+        self.regalpha_low = None
+        self.regalpha_high = None
 
     def update_regularizationparam(self, Bk, beta0):
         '''Main entry point to update the regularization parameter.
@@ -67,24 +74,71 @@ class UpdateRegBase(ABC):
         self._compute_svd(Bk)
         
         # Compute the next regularization parameter
-        new_regalpha = self._compute_next_regalpha()
+        res = self._compute_next_regalpha()
+
+        # Handle return values
+        if isinstance(res, (tuple, list)) and len(res) == 2:
+            new_regalpha, func_value = res
+        else:
+            new_regalpha = res
+            func_value = None
         
         # Update state if a new regularization parameter is found
         if new_regalpha is not None:
             self.regalpha = new_regalpha
-            self.regalphavec = np.append(self.regalphavec, new_regalpha)
+            
+            # Append to history
+            self.regalpha_history.append(new_regalpha)
+            # Verify func_value is scalar and not None or Nan or infinite
+            if np.isscalar(func_value) and func_value is not None and not np.isnan(func_value) and not np.isinf(func_value):
+                self.func_history.append(func_value)
             
             self._run_convergence_checks()
         self._print_status()
     
-    def plot_history(self):
-        '''Utility to plot the history of regularization parameters.'''
-        plt.plot(self.regalphavec, marker='o')
-        plt.xlabel('Iteration')
-        plt.ylabel('Regularization Parameter (alpha)')
-        plt.title(f'History of {self.rule_type} Regularization Parameter')
-        plt.yscale('log')
-        plt.grid(True)
+    def plot_history(self, show_objective=False):
+        '''
+        Utility to plot the history of regularization parameters.
+
+        Parameters
+        ----------
+        show_objective : bool, optional
+            If True, plots both the alpha history and the objective function 
+            value history in subplots. Default is False.
+        '''
+        # Determine number of subplots
+        if show_objective and len(self.func_history) == 0:
+            raise ValueError("No function history available to plot.")
+        if len(self.regalpha_history) == 0:
+            raise ValueError("No regularization parameter history available to plot.")
+        
+        # Determine number of subplots
+        num_subs = 2 if show_objective else 1
+        
+        fig, axes = plt.subplots(num_subs, 1, figsize=(8, 4 * num_subs), sharex=True)
+        
+        # Handle axes indexing for 1 vs 2 subplots
+        ax_alpha = axes[0] if show_objective else axes
+        
+        # Subplot 1: Regularization History
+        ax_alpha.plot(self.regalpha_history, marker='o', color='tab:blue', label=r'$\alpha$')
+        ax_alpha.set_ylabel(r'Regularization $\alpha$')
+        ax_alpha.set_yscale('log')
+        ax_alpha.set_title(f'{self.rule_type.upper()} Regularization Parameter History')
+        ax_alpha.grid(True, which="both", ls="-", alpha=0.5)
+
+        if show_objective:
+            # Subplot 2: Objective History
+            ax_func = axes[1]
+            iters = np.arange(len(self.func_history))
+            ax_func.plot(iters, self.func_history, marker='x', color='tab:red', linestyle='--')
+            ax_func.set_ylabel(f'{self.rule_type.upper()} Function History')
+            ax_func.set_xlabel('Iteration')
+            ax_func.grid(True, alpha=0.5)
+        else:
+            ax_alpha.set_xlabel('Iteration')
+
+        plt.tight_layout()
         plt.show()
 
     def plot_function(self):
@@ -153,10 +207,10 @@ class UpdateRegBase(ABC):
         
         Uses a relative change formula with a safety epsilon EPS.
         '''
-        if len(self.regalphavec) < 2:
+        if len(self.regalpha_history) < 2:
             return
-        denom = abs(self.regalphavec[-1]) + self.EPS
-        rel_change = abs(self.regalphavec[-1] - self.regalphavec[-2]) / denom
+        denom = abs(self.regalpha_history[-1]) + self.EPS
+        rel_change = abs(self.regalpha_history[-1] - self.regalpha_history[-2]) / denom
         
         if rel_change < self.tol:
             print(f"Alpha Saturation: Converged at iteration {self.iteration}")
@@ -170,6 +224,9 @@ class UpdateRegBase(ABC):
         -------
         new_regalpha : float
             The updated regularization parameter.
+        func_value : float, optional
+            The computed function value at the new regularization parameter.
+            If not provided, return new_regalpha.
         '''
         pass
 
@@ -248,13 +305,19 @@ class UpdateRegDiscrep(UpdateRegBase):
 
     """
 
-    def __init__(self, regalpha_saturation_tol, m, n, discrep_noise_level):
+    def __init__(self, regalpha_saturation_tol, m, n, discrep_noise_level=0.0):
         super().__init__(regalpha_saturation_tol, m, n)
         self.rule_type = "discrep"
         self.noise_level = discrep_noise_level
     
     def _compute_next_regalpha(self):
-        """Finds alpha such that ||r_alpha|| = noise_level using Brent's method."""
+        """Finds alpha such that ||r_alpha|| = noise_level using Brent's method.
+        
+        Returns
+        -------
+        regalpha : float
+            The updated regularization parameter.
+        """
         # Bracket the root: lo=0 (least smoothing), hi=large (most smoothing)
         f_lo, f_hi = self.func(self.regalpha_low), self.func(self.regalpha_high)
 
@@ -312,16 +375,21 @@ class UpdateRegLcurve(UpdateRegBase):
     This rule identifies the "corner" of the L-curve—the point of maximum curvature 
     when plotting the log-norm of the solution versus the log-norm of the residual.
 
-    In the :math:`k`-th Krylov subspace, we define:
+    In the :math:`k`-th Krylov subspace, the performance of the regularised 
+    solution :math:`x_\alpha` is evaluated using the following projected norms:
     
     .. math:: \eta(\alpha) = \log \|x_\alpha\|_2, \quad \rho(\alpha) = \log \|r_\alpha\|_2
 
-    The curvature :math:`\kappa(\alpha)` is computed using exact analytical first and 
-    second derivatives of the projected norms:
+    These are the logarithms of the projected solution and residual norms, respectively.
+    See :meth:`_projected_solution_norm_sq` and :meth:`_projected_residual_norm_sq` for details.
+
+    The curvature :math:`\kappa(\alpha)` is computed using exact analytical first 
+    (:math:`\rho', \eta'`) and second (:math:`\rho'', \eta''`) derivatives of 
+    these log-norms with respect to :math:`\alpha`:
 
     .. math:: \kappa(\alpha) = \frac{\rho' \eta'' - \eta' \rho''}{((\rho')^2 + (\eta')^2)^{3/2}}
 
-    The algorithm finds :math:`\alpha` that maximizes :math:`\kappa(\alpha)` using 
+    The algorithm finds :math:`\alpha` that maximizes the curvature :math:`\kappa(\alpha)` using 
     a bounded optimization search within the range of the current projected 
     singular values.
 
@@ -336,18 +404,27 @@ class UpdateRegLcurve(UpdateRegBase):
 
     Attributes
     ----------
-    kappa : float
-        The curvature value at the currently selected :math:`\alpha`.
-    kappavec : np.ndarray
-        History of maximum curvature values found at each iteration.
+    curvature : float
+        The maximum curvature value $\kappa$ found at the currently selected $\alpha$.
+    curvature_history : np.ndarray
+        History of maximum curvature values found at each iteration $k$.
     """
+    def __init__(self, regalpha_saturation_tol, m, n):
+        super().__init__(regalpha_saturation_tol, m, n)
+        self.rule_type = "l-curve"
+
     def _compute_next_regalpha(self):
-        return 0.0
+        return 0.0, 0.0
     def func(self, regalpha):
         return 0.0
 
 class UpdateRegGCV(UpdateRegBase):
+    def __init__(self, regalpha_saturation_tol, m, n, gcv_type='weighted'):
+        super().__init__(regalpha_saturation_tol, m, n)
+        if gcv_type not in ['weighted','adaptive-weighted', 'standard']:
+            raise ValueError(f"gcv_type must be one of 'weighted', 'adaptive-weighted', or 'standard'. Got {gcv_type}")
+        self.rule_type = f"{gcv_type} gcv"
     def _compute_next_regalpha(self):
-        return 0.0
+        return 0.0, 0.0
     def func(self, regalpha):
         return 0.0
