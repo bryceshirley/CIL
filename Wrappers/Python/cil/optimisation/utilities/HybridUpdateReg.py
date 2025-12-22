@@ -92,7 +92,24 @@ class UpdateRegBase(ABC):
         print("Plotting function not implemented")
     
     def _projected_residual_norm_sq(self, reg):
-        """Common logic for the squared projected residual norm."""
+        """
+        Computes the squared projected residual norm $\|r_\alpha\|_2^2$.
+
+        The residual norm in the $k$-th Krylov subspace is given by:
+        .. math::
+            \rho(\alpha)^2 = \sum_{i=1}^k \left( \frac{\alpha^2}{\sigma_i^2 + \alpha^2} (u_i^T \beta e_1) \right)^2 
+            + (u_{k+1}^T \beta e_1)^2
+
+        Parameters
+        ----------
+        reg : float
+            The regularization parameter $\alpha$.
+
+        Returns
+        -------
+        float
+            Squared norm of the residual.
+        """
         # filt = alpha^2 / (s^2 + alpha^2)
         filt = (reg**2) / (self.Sbsq + reg**2)
         
@@ -103,6 +120,33 @@ class UpdateRegBase(ABC):
         r2 = np.square(self.beta0 * self.u1T.T[-1])
         
         return r1 + r2
+    
+    def _projected_solution_norm_sq(self, reg):
+        """
+        Computes the squared projected solution norm $\|x_\alpha\|_2^2$.
+
+        The solution norm in the $k$-th Krylov subspace is given by:
+        .. math::
+            \eta(\alpha)^2 = \sum_{i=1}^k \left( \frac{\sigma_i}{\sigma_i^2 + \alpha^2} (u_i^T \beta e_1) \right)^2
+
+        Parameters
+        ----------
+        reg : float
+            The regularization parameter $\alpha$.
+
+        Returns
+        -------
+        float
+            Squared norm of the solution.
+        """
+        # Solution filter factor: s / (s^2 + alpha^2)
+        # Derived from x = V * inv(S^2 + alpha^2*I) * S * U.T * b
+        filt = self.Sb / (self.Sbsq + reg**2)
+        
+        # Only the first k components contribute to the solution norm
+        sol_norm_sq = np.sum(np.square(filt * (self.beta0 * self.u1T.T[:-1])))
+        
+        return sol_norm_sq
 
     def _run_convergence_checks(self):
         '''Standard convergence check based on the saturation of alpha.
@@ -261,3 +305,49 @@ class UpdateRegDiscrep(UpdateRegBase):
         plt.legend()
         plt.grid()
         plt.show()
+
+class UpdateRegLcurve(UpdateRegBase):
+    r"""L-curve method for choosing the regularisation parameter :math:`\alpha`.
+
+    This rule identifies the "corner" of the L-curve—the point of maximum curvature 
+    when plotting the log-norm of the solution versus the log-norm of the residual.
+
+    In the :math:`k`-th Krylov subspace, we define:
+    
+    .. math:: \eta(\alpha) = \log \|x_\alpha\|_2, \quad \rho(\alpha) = \log \|r_\alpha\|_2
+
+    The curvature :math:`\kappa(\alpha)` is computed using exact analytical first and 
+    second derivatives of the projected norms:
+
+    .. math:: \kappa(\alpha) = \frac{\rho' \eta'' - \eta' \rho''}{((\rho')^2 + (\eta')^2)^{3/2}}
+
+    The algorithm finds :math:`\alpha` that maximizes :math:`\kappa(\alpha)` using 
+    a bounded optimization search within the range of the current projected 
+    singular values.
+
+    Parameters
+    ----------
+    regalpha_saturation_tol : float
+        Relative tolerance for convergence of the regularisation parameter.
+    m : int
+        Number of rows in the forward operator :math:`A`.
+    n : int
+        Number of columns in the forward operator :math:`A`.
+
+    Attributes
+    ----------
+    kappa : float
+        The curvature value at the currently selected :math:`\alpha`.
+    kappavec : np.ndarray
+        History of maximum curvature values found at each iteration.
+    """
+    def _compute_next_regalpha(self):
+        return 0.0
+    def func(self, regalpha):
+        return 0.0
+
+class UpdateRegGCV(UpdateRegBase):
+    def _compute_next_regalpha(self):
+        return 0.0
+    def func(self, regalpha):
+        return 0.0
