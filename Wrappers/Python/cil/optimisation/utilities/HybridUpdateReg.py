@@ -10,7 +10,7 @@ class UpdateRegBase(ABC):
 
     Parameters
     ----------
-    regalpha_saturation_tol : float
+    tol : float
         Relative tolerance for convergence.
     m : int
         Number of rows in the forward operator.
@@ -18,17 +18,17 @@ class UpdateRegBase(ABC):
         Number of columns in the forward operator.
     '''
 
-    def __init__(self, regalpha_saturation_tol, m, n):
+    def __init__(self, tol, m, n):
         # Validation for initialization parameters
         if m <= 0 or n <= 0:
             raise ValueError(f"Dimensions m and n must be positive integers. Got m={m}, n={n}")
-        if regalpha_saturation_tol <= 0:
-            raise ValueError(f"Tolerance must be greater than 0. Got {regalpha_saturation_tol}")
+        if tol <= 0:
+            raise ValueError(f"Tolerance must be greater than 0. Got {tol}")
 
         self.rule_type = "base rule"
         self.m = m
         self.n = n
-        self.tol = regalpha_saturation_tol
+        self.tol = tol
         
         # History and state variables
         self.regalpha = 0.0
@@ -406,7 +406,7 @@ class UpdateRegDiscrep(UpdateRegBase):
 
     Parameters
     ----------
-    regalpha_saturation_tol : float
+    tol : float
         Relative tolerance for convergence of the regularisation parameter.
     m : int
         Number of rows in the forward operator :math:`A`.
@@ -423,8 +423,8 @@ class UpdateRegDiscrep(UpdateRegBase):
 
     """
 
-    def __init__(self, regalpha_saturation_tol, m, n, noise_level_estimate=0.0):
-        super().__init__(regalpha_saturation_tol, m, n)
+    def __init__(self, tol, m, n, noise_level_estimate=0.0):
+        super().__init__(tol, m, n)
         self.rule_type = "discrep"
         self.noise_level_estimate = noise_level_estimate
     
@@ -553,15 +553,15 @@ class UpdateRegLcurve(UpdateRegBase):
 
     Parameters
     ----------
-    regalpha_saturation_tol : float
+    tol : float
         Relative tolerance for convergence of the regularisation parameter.
     m : int
         Number of rows in the forward operator :math:`A`.
     n : int
         Number of columns in the forward operator :math:`A`.
     """
-    def __init__(self, regalpha_saturation_tol, m, n):
-        super().__init__(regalpha_saturation_tol, m, n)
+    def __init__(self, tol, m, n):
+        super().__init__(tol, m, n)
         self.rule_type = "l-curve"
 
     def _compute_next_regalpha(self):
@@ -587,13 +587,11 @@ class UpdateRegLcurve(UpdateRegBase):
         x0_refined = grid_alphas[inner_idx]
 
         # 3. Local Refinement: Bounded Optimization
-        # We maximize the absolute curvature to handle potential sign flips in noise.
         res = scipy.optimize.minimize(
-            lambda reg: -abs(self.func(reg)),
+            lambda reg: -self.func(reg),
             x0=x0_refined, 
             bounds=[(10**log_low, 10**log_high)],
             tol=1e-10,
-            options={'ftol': 1e-14}
         )
 
         if res.success and np.isfinite(res.x[0]):
@@ -823,12 +821,252 @@ class UpdateRegLcurve(UpdateRegBase):
         plt.close(fig)
 
 class UpdateRegGCV(UpdateRegBase):
-    def __init__(self, regalpha_saturation_tol, m, n, gcv_type='weighted'):
-        super().__init__(regalpha_saturation_tol, m, n)
-        if gcv_type not in ['weighted','adaptive-weighted', 'standard']:
-            raise ValueError(f"gcv_type must be one of 'weighted', 'adaptive-weighted', or 'standard'. Got {gcv_type}")
+    r"""Generalized Cross-Validation (GCV) method for choosing the regularisation parameter :math:`\alpha`.
+
+    This rule identifies the optimal :math:`\alpha` by minimizing the GCV function, 
+    which serves as a proxy for the predictive mean square error. It supports 
+    standard, weighted, and adaptive-weighted variations.
+
+    The GCV function :math:`G(\alpha)` is defined as:
+
+    .. math:: G(\alpha) = \frac{k \|r_\alpha\|_2^2}{[\text{trace}(I - \omega A_\alpha)]^2}
+
+    where :math:`k` is the current iteration (subspace dimension), :math:`r_\alpha` is 
+    the projected residual, and :math:`\omega` is a weighting factor.
+
+    - **Standard GCV**: :math:`\omega = 1`.
+    - **Weighted GCV**: :math:`\omega` is a fixed scalar (typically :math:`< 1`) to 
+      correct for the undersmoothing tendency of standard GCV.
+    - **Adaptive GCV**: :math:`\omega` is updated at each iteration based on the 
+      noise level and singular value decay to provide a more robust estimate.
+
+    The minimization is performed using a bounded search within the range 
+    :math:`[\alpha_{low}, \alpha_{high}]`. Convergence is monitored via the 
+    stability of the :math:`\hat{G}` functional.
+
+    Parameters
+    ----------
+    tol : float
+        Relative tolerance for convergence of the regularisation parameter.
+    m : int
+        Number of rows in the forward operator :math:`A`.
+    n : int
+        Number of columns in the forward operator :math:`A`.
+    gcv_weight : float, optional
+        The weighting parameter :math:`\omega`. Defaults to 1.0 (standard GCV).
+    adaptive_weight : bool, optional
+        If True, ignores `gcv_weight` and computes an adaptive :math:`\omega` 
+        at each iteration. Defaults to True.
+    """
+    def __init__(self, tol, m, n,
+                 gcv_weight: float = 1.0, # 1.0 is standard GCV
+                 adaptive_weight: bool = True # Whether to use adaptive weighting
+                 ):
+        super().__init__(tol, m, n)
+        if adaptive_weight:
+            gcv_type = 'adaptive-weighted'
+        elif gcv_weight == 1.0:
+            gcv_type = 'standard'
+        else:
+            gcv_type = 'weighted'
         self.rule_type = f"{gcv_type} gcv"
+        self.gcv_type = gcv_type
+        self.omega = gcv_weight
+        self.omega_history = []
+        self.Ghat_history = []
+
     def _compute_next_regalpha(self):
-        return 0.0
+        """
+        Minimize the GCV function to find the next regularization parameter.
+        Returns
+        -------
+        regalpha : float
+            The updated regularization parameter.
+        """
+        if self.gcv_type == 'adaptive-weighted':
+            self.omega = self._adaptive_omega()
+        
+        # Grid search in log space to find a good starting point (x0)
+        regalpha_grid, func_grid, _ = self._geometric_grid()
+
+        # Find the peak from the grid, avoiding the very first/last points 
+        # to bypass the boundary plateaus seen in your plots.
+        grid_search_idx = np.argmin(func_grid)
+        x0 = regalpha_grid[grid_search_idx]
+        
+        # Minimize the log of alpha
+        res = scipy.optimize.minimize(
+            lambda reg: self.func(reg), # Transform back inside the call
+            x0=x0, 
+            bounds=[(self.regalpha_low, self.regalpha_high)],
+            tol=1e-10,
+        )
+        
+        if res.success and np.isfinite(res.x[0]):
+            new_regalpha = res.x[0] # Return the actual alpha
+        else:
+            new_regalpha = x0 # Fallback to grid search alpha
+        
+        # Update GHat history for convergence monitoring
+        if self.iteration > 0:
+            self.Ghat_history.append(self.Ghat_func(self.regalpha))
+        return new_regalpha
+    
+    def _adaptive_omega(self):
+        '''
+        Compute an adaptive GCV weighting parameter omega.
+        
+        For early iterations we need small regularization so we solve for
+        the weight omega that gives the derivative of the GCV function 
+        equal to zero.
+
+        For late iterations, projected Bk will inheret more and more of the 
+        ill-conditioning present in forward operator, at some point when the
+        ratio Sbmin/Sbmax is very small, we average the omega values over 
+        previous iterations to stabilize the estimate. 
+        '''
+        # Compute adaptive omega from Gradient of GCV functional
+        filt = 1 / (self.Sbmin + self.Sbsq)
+        u1_tail_sq = self.u1_tail * self.u1_tail
+        num = (
+            (self.iteration + 1) * self.Sbmin * self.Sbmin * \
+                np.sum(u1_tail_sq * self.Sbsq * np.power(filt, 3))
+        )
+        denom1 = np.sum(np.power(self.Sbmin, 4) * u1_tail_sq * np.power(filt, 2)) + u1_tail_sq
+        denom2 = np.sum(self.Sbsq * np.power(filt, 2))
+        denom3 = self.Sbmin * self.Sbmin * np.sum(u1_tail_sq * self.Sbsq * np.power(filt, 3))
+        denom4 = np.sum(self.Sbsq * filt)
+
+        omega = num / (denom1 * denom2 + denom3 * denom4)
+        self.omega_history.append(omega)
+
+        # Stabilize omega in late iterations
+        if self.Sbmin / self.Sbmax < 1e-6:
+            omega = np.mean(self.omega_history)
+        return omega
+
+    def _weighted_trace(self, regalpha, constrained_dofs):
+        '''
+        Compute the weighted trace term in the GCV denominator:
+        trace(I - omega * A_alpha) = constrained_dofs + sum_i filt_i
+        where filt_i = ((1 - omega) * sigma_i^2 + alpha^2) / (sigma_i^2 + alpha^2)
+        '''
+        filt = ((1 - self.omega) * self.Sbsq + regalpha**2) / (self.Sbsq + regalpha**2)
+        return np.square(constrained_dofs + np.sum(filt))
+
     def func(self, regalpha):
-        return 0.0
+        """
+        Generalized Cross-Validation (GCV) functional to minimize for 
+        regularization parameter selection.
+        
+        .. math:: G(alpha) = (k * ||r_alpha||^2) / (trace(I - omega * A_alpha))^2
+        
+        where:
+            - k is the current iteration (subspace dimension)
+            - r_alpha is the projected residual
+            - omega is the weighting factor
+        """
+        return (
+            self.iteration 
+            * self._projected_residual_norm_sq(regalpha) 
+            / self._weighted_trace(regalpha, 1)
+        )
+    
+    def Ghat_func(self, regalpha):
+        """
+        Chung, Nagy, and O'Leary (2008) propose a modified GCV functional
+        to monitor convergence of the regularization parameter. We define:
+
+        .. math:: \hat{G}(\omega,\alpha_k) = n*||b||^2 * [ \sum_{i=1}^k ( (\alpha_k^2 * u1_i * e_1) / (\sigma_i^2 + \alpha_k^2) )^2 + (u_{k+1} * e_1)^2 ] 
+                    / [ (m - k) + \sum_{i=1}^k ((1-\omega)\sigma_i^2 + \alpha_k^2) / (\sigma_i^2 + \alpha_k^2) ) ]^2
+        """
+        return (
+            self.n
+            * self._projected_residual_norm_sq(regalpha) 
+            / self._weighted_trace(regalpha, self.m - self.iteration)
+        )
+        
+    def _run_convergence_checks(self):
+        """
+        Override base method to include GHat convergence check based on Chung et al. (2008).
+        ----------------------------------------------------------------------------------
+        1. Calls the base class convergence checks based on regalpha convergence.
+        2. Appends the current GHat (math:: \hat{G}(\omega,\alpha_k)) value to history, defined 
+              in :meth:`Ghat_func`.
+        3. Checks for convergence based on two simultaneous criteria:
+            a. Convergence: math:: |\hat{G}(k) - \hat{G}(k-1)| / |\hat{G}(1)| < \text{tol}_G
+            b. Monotonicity: k_0 = \arg\min \hat{G}(k) Stop if \hat{G}(k) > \hat{G}(k-1) > \hat{G}(k-2)
+        4. Sets the convergence flag and updates alpha = alpha_{k_0} if criteria are met.
+        ----------------------------------------------------------------------------------
+        """
+        super()._run_convergence_checks()
+
+        if len(self.Ghat_history) > 3:
+            if (
+                abs(self.Ghat_history[-1] - self.Ghat_history[-2]) / abs(self.Ghat_history[0])
+                < self.tol
+            ):
+                print(
+                    "GHat: The regularisation parameter has converged at outer iteration",
+                    self.iteration,
+                )
+                self.converged = True
+            elif (
+                self.Ghat_history[-1] > self.Ghat_history[-2]
+                and self.Ghat_history[-2] > self.Ghat_history[-3]
+            ):
+                self.iteration = np.argmin(self.Ghat_history)
+                self.regalpha = self.regalpha_history[self.iteration]
+
+                print(
+                    "The regularisation parameter has converged at outer iteration",
+                    self.iteration,
+                )
+                self.converged = True
+    
+    def plot_function(self, regalpha_limits: Optional[Tuple[float, float]] = None, 
+                      num_points: int = 80,
+                      filepath: Optional[str] = None):
+        r"""
+        Plot the GCV function over a range of regularization parameters.
+
+        Args:
+            regalpha_limits (Optional[Tuple[float, float]]): 
+                The (min, max) range for :math:`\alpha`. Defaults to (self.regalpha_low, self.regalpha_high).
+            num_points (int): 
+                Number of points in the grid. Defaults to 80.
+            filepath (Optional[str]):
+                If provided, saves the plot to the specified file path.
+        """
+        # Generate grid data and evaluate GCV function
+        regalpha_grid, func_grid, reg_idx = self._geometric_grid(regalpha_limits, num_points)
+
+        # Find the peak from the grid, avoiding the very first/last points 
+        # to bypass the boundary plateaus seen in your plots.
+        grid_search_idx = np.argmin(func_grid)
+        regalpha_grid[grid_search_idx]
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.semilogx(
+            regalpha_grid, func_grid,
+            label=f'{self.gcv_type.upper()} GCV Function'
+        )
+        ax.semilogx(
+            regalpha_grid[reg_idx], func_grid[reg_idx], "ro", 
+            markersize=8, label=rf"$\alpha={self.regalpha:.3e}$"
+        )
+        ax.semilogx(
+            regalpha_grid[grid_search_idx], func_grid[grid_search_idx], "bo", 
+            markersize=8, label=rf"Grid Search $\alpha={regalpha_grid[grid_search_idx]:.3e}$"
+        )
+        ax.axvline(self.regalpha, color="gray", linestyle=":", alpha=0.5)
+        ax.set_xlabel("Regularisation parameter ($\\alpha$)")
+        ax.set_ylabel("GCV Function Value")
+        ax.set_title(f"{self.gcv_type.upper()} GCV Function and Weight ($\omega={self.omega:.3e}$)")
+        ax.legend()
+        ax.grid(True, which="both", linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        if filepath:
+            plt.savefig(filepath)
+        plt.show()
+        plt.close(fig)
