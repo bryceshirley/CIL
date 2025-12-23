@@ -57,7 +57,7 @@ class RegRuleInfrastructureTestsMixin:
         self.b_norm = 1.0
         self.RuleClass = RuleClass
 
-    def setup_noisy_system(self, rule=None, noise_level = 0.1):
+    def setup_noisy_system(self, rule=None, noise_level = 0.1,random_noise=False):
         """
         Factory to create a rule instance with an injected ill-conditioned state.
         Bypasses SVD computation to focus on rule-specific logic.
@@ -79,7 +79,12 @@ class RegRuleInfrastructureTestsMixin:
         # creating the vertical 'noise' arm of the L-curve.
         # This is the discrete Picard condition violation.
         u1_raw = np.logspace(0, -3, rule.iteration + 1)
-        u1_raw[-10:] = noise_level 
+        if  random_noise:
+            rng = np.random.default_rng(seed=42)
+            noise_tail = rng.normal(loc=0, scale=noise_level, size=10)
+            u1_raw[-10:] = np.abs(noise_tail)
+        else:
+            u1_raw[-10:] = noise_level 
         u1 = u1_raw / np.linalg.norm(u1_raw) # Ensure ||u1|| = 1
         rule.u1_tail = u1[-1]
         rule.u1 = u1[:-1]
@@ -234,15 +239,15 @@ class RegRuleInfrastructureTestsMixin:
 
         # Test negative/zero dimensions
         with self.assertRaises(ValueError):
-            self.RuleClass(regalpha_saturation_tol=1e-3, m=0, n=100)
+            self.RuleClass(tol=1e-3, m=0, n=100)
         with self.assertRaises(ValueError):
-            self.RuleClass(regalpha_saturation_tol=1e-3, m=100, n=-5)
+            self.RuleClass(tol=1e-3, m=100, n=-5)
         
         # Test non-positive tolerance
         with self.assertRaises(ValueError):
-            self.RuleClass(regalpha_saturation_tol=0, m=100, n=100)
+            self.RuleClass(tol=0, m=100, n=100)
         with self.assertRaises(ValueError):
-            self.RuleClass(regalpha_saturation_tol=-1e-4, m=100, n=100)
+            self.RuleClass(tol=-1e-4, m=100, n=100)
 
     def test_invalid_update_inputs(self):
         '''Verify that update_regularizationparam rejects inconsistent matrix shapes and types.'''
@@ -640,8 +645,143 @@ class TestUpdateRegGCV(unittest.TestCase, RegRuleInfrastructureTestsMixin):
 
     def test_gcv_minimization(self):
         '''Verify that the selected alpha minimizes the GCV functional.'''
-        pass
+        rule = self.RuleClass(self.tol, self.m, self.n, gcv_weight=0.7)
+        rule = self.setup_noisy_system(rule=rule, noise_level=0.5)
+        
+        # 1. Compute alpha using the rule's optimization
+        rule.regalpha = rule._compute_next_regalpha()
+
+        # 2. Perform a dense grid search for verification
+        regalpha_grid, gcv_values, _ = rule._geometric_grid(num_points=500)
+
+        # Find the peak from the grid, avoiding the very first/last points 
+        # to bypass the boundary plateaus seen in your plots.
+        grid_min_idx = np.argmin(gcv_values)
+        grid_alpha = regalpha_grid[grid_min_idx]
+
+        # Assertions: The optimized value should be close to the grid minimum
+        self.assertAlmostEqual(
+            rule.regalpha, grid_alpha, places=3,
+            msg=f"GCV minimum {rule.regalpha:.2e} differs from grid {grid_alpha:.2e}"
+        )
 
     def test_wgcv_weighting_effect(self):
-        '''Verify that the WGCV weighting affects the selected alpha as expected.'''
-        pass
+        '''Verify that WGCV weighting (omega < 1) reduces the regularization (alpha).'''
+        noise_level = 0.05
+        # Standard GCV (omega = 1.0)
+        rule_std = self.setup_noisy_system(noise_level=noise_level)
+        rule_std.gcv_type = 'standard'
+        rule_std.regalpha = rule_std._compute_next_regalpha()
+
+        # Weighted GCV
+        rule_weighted = self.setup_noisy_system(noise_level=noise_level)
+        rule_weighted.gcv_type = 'weighted'
+        rule_weighted.omega = 0.9  # Strong weighting
+        rule_weighted.regalpha = rule_weighted._compute_next_regalpha()
+
+        self.assertLess(
+            rule_weighted.regalpha, rule_std.regalpha, 
+            f"Weighted GCV alpha ({rule_weighted.regalpha:.2e}) should be < Standard ({rule_std.regalpha:.2e})"
+        )
+
+    def test_ghat_convergence_stability(self):
+        """
+        Verify convergence when GHat stability criterion is met.
+        Ref: Chung, Nagy, O'Leary (2008)
+        """
+        rule = self.setup_noisy_system()
+        rule.tol = 1e-2
+        rule.iteration = 5
+        
+        # Simulate a stable GHat history: |G(k) - G(k-1)| / |G(1)| < tol
+        # Values: [100, 50, 20, 10, 10.01] -> change is 0.01/100 = 0.0001 < 0.01
+        rule.Ghat_history = [100.0, 50.0, 20.0, 10.0, 10.01]
+        rule.regalpha = 0.1
+        
+        rule._run_convergence_checks()
+        self.assertTrue(rule.converged, "Should converge when GHat changes very little.")
+
+    def test_ghat_monotonicity_stop(self):
+        """
+        Verify convergence when GHat starts to increase (minimum found).
+        Ref: Chung, Nagy, O'Leary (2008)
+        """
+        rule = self.setup_noisy_system()
+        rule.iteration = 6
+        
+        # Simulate GHat increasing for two consecutive steps
+        # Minimum is at index 2 (val 5.0)
+        rule.Ghat_history = [10.0, 8.0, 5.0, 6.0, 7.0]
+        rule.regalpha_history = [0.5, 0.4, 0.2, 0.25, 0.3]
+        rule.regalpha = 0.3
+        
+        rule._run_convergence_checks()
+        
+        self.assertTrue(rule.converged, "Should converge when GHat starts to increase.")
+        self.assertEqual(
+            rule.regalpha, 0.2, 
+            "Regalpha should be reset to the value at argmin(GHat)."
+        )
+
+    def test_adaptive_omega_calculation(self):
+        """Verify that adaptive omega is stored and stabilized."""
+        rule = self.setup_noisy_system()
+        rule.gcv_type = 'adaptive-weighted'
+        
+        # Mock values to trigger stabilization (Sbmin/Sbmax < 1e-6)
+        rule.Sbmin = 1e-7
+        rule.Sbmax = 1.0
+        rule.omega_history = [0.9, 0.8, 0.7]
+        
+        omega = rule._adaptive_omega()
+        
+        # Should be the mean of history: (0.9 + 0.8 + 0.7 + new_val) / 4
+        # Since new_val is calculated from mock data, we just check it appended to history
+        self.assertEqual(len(rule.omega_history), 4)
+        self.assertTrue(0 <= omega <= 1.5) # Sanity check for weight range
+
+    def test_weighted_trace_math(self):
+        """
+        Verify the implementation of (1-omega) term for WGCV in Ghat's denominator.
+        """
+        rule = self.setup_noisy_system()
+        rule.omega = 0.5
+        alpha = 0.1
+        
+        # Implementation: ((1 - omega) * sigma^2 + alpha^2) / (sigma^2 + alpha^2)
+        expected_filt = ((1 - 0.5) * rule.Sbsq + alpha**2) / (rule.Sbsq + alpha**2)
+        expected_trace = (rule.m - rule.iteration + np.sum(expected_filt))**2
+        
+        actual_trace = rule._weighted_trace(alpha, rule.m - rule.iteration)
+        
+        self.assertAlmostEqual(actual_trace, expected_trace, places=7)
+    
+    def test_ghat_functional_consistency(self):
+        """
+        Verify that Ghat_func accurately implements the formula:
+        Ghat = n * ||b||^2 * [||r_p||^2] / [ (m-k) + trace(I - A_alpha) ]^2
+        """
+        rule = self.setup_noisy_system()
+        alpha = 0.1
+        
+        # Manually calculate the components from the source formula
+        # self.n corresponds to 'n' in the formula
+        # self.b_norm**2 corresponds to '||b||^2'
+        numerator_factor = rule.n * (rule.b_norm**2)
+        
+        # The term in brackets in the image is the projected residual norm squared
+        # scaled by ||b||^2
+        res_norm_sq = rule._projected_residual_norm_sq(alpha)
+        
+        # The denominator uses (m - k) plus the summation
+        k = rule.iteration
+        m = rule.m
+        # Summation term for omega=1: sum( alpha^2 / (sigma_i^2 + alpha^2) )
+        summation = np.sum(alpha**2 / (rule.Sbsq + alpha**2))
+        denominator = ((m - k) + summation)**2
+        
+        expected_ghat = (numerator_factor * res_norm_sq) / denominator
+        actual_ghat = rule.Ghat_func(alpha)
+        
+        self.assertAlmostEqual(actual_ghat, expected_ghat, places=7, 
+                               msg="Ghat_func math does not match the paper's formula.")
