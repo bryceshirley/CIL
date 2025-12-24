@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 
 log = logging.getLogger(__name__)
 
+
 class UpdateRegBase(ABC):
     """Base class for updating regularization parameters in iterative solvers.
 
@@ -15,24 +16,27 @@ class UpdateRegBase(ABC):
     ----------
     tol : float
         Relative tolerance for convergence.
-    m : int
-        Number of rows in the forward operator.
-    n : int
-        Number of columns in the forward operator.
+    data_size : int
+        Number of elements in the data; corresponds to range of the operator
+        (denoted as 'm').
+    domain_size : int
+        Number of elements in the solution; corresponds to domain of the operator
+        (denoted as 'n').
     """
 
-    def __init__(self, m: int, n: int, tol: float = 1e-2):
+    def __init__(self, data_size: int, domain_size: int, tol: float = 1e-2):
         # Validation for initialization parameters
-        if m <= 0 or n <= 0:
+        if data_size <= 0 or domain_size <= 0:
             raise ValueError(
-                f"Dimensions m and n must be positive integers. Got m={m}, n={n}"
+                f"Dimensions data_size and domain_size must be positive integers. "
+                f"Got data_size={data_size}, domain_size={domain_size}"
             )
         if tol <= 0:
             raise ValueError(f"Tolerance must be greater than 0. Got {tol}")
 
         self.rule_type = "base rule"
-        self.m = m
-        self.n = n
+        self.m = data_size
+        self.n = domain_size
         self.tol = tol
 
         # History and state variables
@@ -406,6 +410,7 @@ class UpdateRegBase(ABC):
             f"Iteration {self.iteration}: regalpha = {val} [{self.rule_type.upper()}]"
         )
 
+
 class UpdateRegDiscrep(UpdateRegBase):
     r"""Discrepancy Principle for choosing the regularisation parameter :math:`\alpha`.
 
@@ -431,10 +436,12 @@ class UpdateRegDiscrep(UpdateRegBase):
     ----------
     tol : float
         Relative tolerance for convergence of the regularisation parameter.
-    m : int
-        Number of rows in the forward operator :math:`A`.
-    n : int
-        Number of columns in the forward operator :math:`A`.
+    data_size : int
+        Number of elements in the data; corresponds to range of the operator
+        (denoted as 'm').
+    domain_size : int
+        Number of elements in the solution; corresponds to domain of the operator
+        (denoted as 'n').
     noise_level_estimate : float
         The estimated norm of the noise in the right-hand side, :math:`\eta = \|e\|_2`.
 
@@ -446,8 +453,14 @@ class UpdateRegDiscrep(UpdateRegBase):
 
     """
 
-    def __init__(self, tol, m, n, noise_level_estimate=0.0):
-        super().__init__(tol, m, n)
+    def __init__(
+        self,
+        data_size: int,
+        domain_size: int,
+        tol: float = 1e-2,
+        noise_level_estimate=0.0,
+    ):
+        super().__init__(data_size, domain_size, tol)
         self.rule_type = "discrep"
         self.noise_level_estimate = noise_level_estimate
 
@@ -595,14 +608,16 @@ class UpdateRegLcurve(UpdateRegBase):
     ----------
     tol : float
         Relative tolerance for convergence of the regularisation parameter.
-    m : int
-        Number of rows in the forward operator :math:`A`.
-    n : int
-        Number of columns in the forward operator :math:`A`.
+    data_size : int
+        Number of elements in the data; corresponds to range of the operator
+        (denoted as 'm').
+    domain_size : int
+        Number of elements in the solution; corresponds to domain of the operator
+        (denoted as 'n').
     """
 
-    def __init__(self, tol, m, n):
-        super().__init__(tol, m, n)
+    def __init__(self, data_size: int, domain_size: int, tol: float = 1e-2):
+        super().__init__(data_size, domain_size, tol)
         self.rule_type = "l-curve"
 
     def _compute_next_regalpha(self):
@@ -897,10 +912,12 @@ class UpdateRegGCV(UpdateRegBase):
     ----------
     tol : float
         Relative tolerance for convergence of the regularisation parameter.
-    m : int
-        Number of rows in the forward operator :math:`A`.
-    n : int
-        Number of columns in the forward operator :math:`A`.
+    data_size : int
+        Number of elements in the data; corresponds to range of the operator
+        (denoted as 'm').
+    domain_size : int
+        Number of elements in the solution; corresponds to domain of the operator
+        (denoted as 'n').
     gcv_weight : float, optional
         The weighting parameter :math:`\omega`. Defaults to 1.0 (standard GCV).
     adaptive_weight : bool, optional
@@ -910,13 +927,13 @@ class UpdateRegGCV(UpdateRegBase):
 
     def __init__(
         self,
-        tol,
-        m,
-        n,
+        data_size: int,
+        domain_size: int,
+        tol: float = 1e-2,
         gcv_weight: float = 1.0,  # 1.0 is standard GCV
         adaptive_weight: bool = True,  # Whether to use adaptive weighting
     ):
-        super().__init__(tol, m, n)
+        super().__init__(data_size, domain_size, tol)
         if adaptive_weight:
             gcv_type = "adaptive-weighted"
         elif gcv_weight == 1.0:

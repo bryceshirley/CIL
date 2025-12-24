@@ -68,7 +68,7 @@ class RegRuleInfrastructureTestsMixin:
         Bypasses SVD computation to focus on rule-specific logic.
         """
         if rule is None:
-            rule = self.RuleClass(self.tol, self.m, self.n)
+            rule = self.RuleClass(data_size=self.m, domain_size=self.n, tol=self.tol)
         rule.iteration = 50
         # Ill-conditioned spectrum (10^1 to 10^-6)
         rule.Sb = np.logspace(1, -6, rule.iteration)
@@ -113,7 +113,7 @@ class RegRuleInfrastructureTestsMixin:
         Factory to create a rule instance after a single iteration.
         """
         if rule is None:
-            rule = self.RuleClass(self.tol, self.m, self.n)
+            rule = self.RuleClass(data_size=self.m, domain_size=self.n, tol=self.tol)
         Bk = self.setup_small_projected_matrix()
 
         rule.update_regularizationparam(Bk, self.b_norm)
@@ -121,7 +121,7 @@ class RegRuleInfrastructureTestsMixin:
 
     def test_initialize_subspace_components(self):
         """Verify SVD components are correctly computed and stored."""
-        rule = self.RuleClass(self.tol, self.m, self.n)
+        rule = self.RuleClass(data_size=self.m, domain_size=self.n, tol=self.tol)
         Bk = self.setup_small_projected_matrix()
 
         rule._initialize_subspace_components(Bk, self.b_norm)
@@ -143,7 +143,7 @@ class RegRuleInfrastructureTestsMixin:
     def test_convergence_logic(self):
         """Verify convergence logic based on relative change in regalpha."""
         tol = 0.1
-        rule = self.RuleClass(tol, self.m, self.n)
+        rule = self.RuleClass(data_size=self.m, domain_size=self.n, tol=tol)
 
         # Condition : |a[-1] - a[-2]| / (|a[-1]| + EPS) < tol
         rule.converged = False
@@ -162,11 +162,11 @@ class RegRuleInfrastructureTestsMixin:
             rule._run_convergence_checks()
             self.assertEqual(rule.converged, expected, msg)
 
-    def test_print_status_formatting(self):
-        """Ensure status printing handles None regalpha gracefully."""
-        rule = self.RuleClass(self.tol, self.m, self.n)
+    def test_log_status_formatting(self):
+        """Ensure status loging handles None regalpha gracefully."""
+        rule = self.RuleClass(data_size=self.m, domain_size=self.n, tol=self.tol)
         # Should not raise error
-        rule._print_status()
+        rule._log_status()
 
     def test_filter_logics(self):
         """Combined test for residual and solution filter mathematics and limits."""
@@ -254,19 +254,19 @@ class RegRuleInfrastructureTestsMixin:
 
         # Test negative/zero dimensions
         with self.assertRaises(ValueError):
-            self.RuleClass(tol=1e-3, m=0, n=100)
+            self.RuleClass(data_size=0, domain_size=100, tol=1e-3)
         with self.assertRaises(ValueError):
-            self.RuleClass(tol=1e-3, m=100, n=-5)
+            self.RuleClass(data_size=100, domain_size=-5, tol=1e-3)
 
         # Test non-positive tolerance
         with self.assertRaises(ValueError):
-            self.RuleClass(tol=0, m=100, n=100)
+            self.RuleClass(tol=0, data_size=100, domain_size=100)
         with self.assertRaises(ValueError):
-            self.RuleClass(tol=-1e-4, m=100, n=100)
+            self.RuleClass(tol=-1e-4, data_size=100, domain_size=100)
 
     def test_invalid_update_inputs(self):
         """Verify that update_regularizationparam rejects inconsistent matrix shapes and types."""
-        rule = self.RuleClass(self.tol, self.m, self.n)
+        rule = self.RuleClass(data_size=self.m, domain_size=self.n, tol=self.tol)
         # Test non-ndarray Bk
         with self.assertRaises(TypeError):
             rule.update_regularizationparam(Bk=[[1, 0], [0, 1]], b_norm=1.0)
@@ -296,7 +296,7 @@ class RegRuleInfrastructureTestsMixin:
     def test_plot_history_error_handling(self):
         """Verify ValueError is raised when trying to plot empty history."""
         # Setup rule without any history
-        rule = self.RuleClass(self.tol, self.m, self.n)
+        rule = self.RuleClass(data_size=self.m, domain_size=self.n, tol=self.tol)
 
         # 1. Test completely empty history
         with self.assertRaisesRegex(ValueError, "No regularization parameter history"):
@@ -367,7 +367,7 @@ class TestUpdateRegBase(unittest.TestCase, RegRuleInfrastructureTestsMixin):
             def func(self, regalpha):
                 return 0
 
-        rule = MockRule(self.tol, self.m, self.n)
+        rule = MockRule(data_size=self.m, domain_size=self.n, tol=self.tol)
 
         # 1. Check Iteration and History Appending
         # Bk.shape[1] is 5, so alpha should be 0.5 / 5 = 0.1
@@ -403,7 +403,7 @@ class TestUpdateRegBase(unittest.TestCase, RegRuleInfrastructureTestsMixin):
             def func(self, regalpha):
                 return 99.0
 
-        rule = MockRule(self.tol, self.m, self.n)
+        rule = MockRule(data_size=self.m, domain_size=self.n, tol=self.tol)
 
         # First call: k=3, alpha = 0.3
         rule.update_regularizationparam(self.Bk, self.b_norm)
@@ -429,7 +429,7 @@ class TestUpdateRegBase(unittest.TestCase, RegRuleInfrastructureTestsMixin):
             def func(self, regalpha):
                 return None
 
-        rule = MockAlphaOnly(self.tol, self.m, self.n)
+        rule = MockAlphaOnly(data_size=self.m, domain_size=self.n, tol=self.tol)
         rule.update_regularizationparam(self.Bk, self.b_norm)
 
         self.assertEqual(len(rule.regalpha_history), 1)
@@ -454,7 +454,7 @@ class TestUpdateRegDiscrep(unittest.TestCase, RegRuleInfrastructureTestsMixin):
         alphas = []
 
         for n in estimated_noises:
-            rule = UpdateRegDiscrep(self.tol, self.m, self.n, noise_level_estimate=n)
+            rule = UpdateRegDiscrep(data_size=self.m, domain_size=self.n, tol=self.tol, noise_level_estimate=n)
             rule = self.setup_small_system_single_iteration(rule=rule)
             alphas.append(rule.regalpha)
             self.assertGreater(rule.regalpha, 0.0)
@@ -470,7 +470,7 @@ class TestUpdateRegDiscrep(unittest.TestCase, RegRuleInfrastructureTestsMixin):
     def test_zero_noise_limit(self):
         """Verify that if noise level is below reachable residual, alpha is 0."""
         # Set noise to 0.0
-        rule = UpdateRegDiscrep(self.tol, self.m, self.n, noise_level_estimate=0.0)
+        rule = UpdateRegDiscrep(data_size=self.m, domain_size=self.n, tol=self.tol, noise_level_estimate=0.0)
         rule = self.setup_small_system_single_iteration(rule=rule)
 
         # The logic should realize that the residual at alpha=0
@@ -485,7 +485,7 @@ class TestUpdateRegDiscrep(unittest.TestCase, RegRuleInfrastructureTestsMixin):
         """Verify that the residual at the selected alpha matches the noise level
         estimate."""
         noise_level_estimate = 0.3
-        rule = UpdateRegDiscrep(self.tol, self.m, self.n, noise_level_estimate)
+        rule = UpdateRegDiscrep(data_size=self.m, domain_size=self.n, tol=self.tol, noise_level_estimate=noise_level_estimate)
         rule = self.setup_small_system_single_iteration(rule=rule)
 
         # func(alpha) should be ~0, meaning residual^2 - noise^2 = 0
@@ -494,7 +494,7 @@ class TestUpdateRegDiscrep(unittest.TestCase, RegRuleInfrastructureTestsMixin):
     def test_discrepancy_mathematical_recalculation(self):
         """Verify that the identified alpha satisfies the Discrepancy Principle."""
         noise_level_estimate = 0.25
-        rule = UpdateRegDiscrep(self.tol, self.m, self.n, noise_level_estimate)
+        rule = UpdateRegDiscrep(data_size=self.m, domain_size=self.n, tol=self.tol, noise_level_estimate=noise_level_estimate)
         rule = self.setup_small_system_single_iteration(rule=rule)
 
         alpha = rule.regalpha
@@ -701,7 +701,7 @@ class TestUpdateRegLcurve(unittest.TestCase, RegRuleInfrastructureTestsMixin):
         bad_Bk = np.zeros((iteration + 1, iteration))
         np.fill_diagonal(bad_Bk, 1e-5)  # Tiny singular values
 
-        rule = self.RuleClass(self.tol, self.m, self.n)
+        rule = self.RuleClass(data_size=self.m, domain_size=self.n, tol=self.tol)
         rule.update_regularizationparam(bad_Bk, self.b_norm)
 
         self.assertIsNotNone(rule.regalpha)
@@ -722,7 +722,7 @@ class TestUpdateRegGCV(unittest.TestCase, RegRuleInfrastructureTestsMixin):
 
     def test_gcv_minimization(self):
         """Verify that the selected alpha minimizes the GCV functional."""
-        rule = self.RuleClass(self.tol, self.m, self.n, gcv_weight=0.7)
+        rule = self.RuleClass(data_size=self.m, domain_size=self.n, tol=self.tol, gcv_weight=0.7)
         rule = self.setup_noisy_system(rule=rule, noise_level=0.5)
 
         # 1. Compute alpha using the rule's optimization
