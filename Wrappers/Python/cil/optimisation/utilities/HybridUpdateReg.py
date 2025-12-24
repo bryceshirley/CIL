@@ -1,10 +1,12 @@
 import numpy as np
+import logging
 import scipy.linalg
 import scipy.optimize
 import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple
 
+log = logging.getLogger(__name__)
 
 class UpdateRegBase(ABC):
     """Base class for updating regularization parameters in iterative solvers.
@@ -19,7 +21,7 @@ class UpdateRegBase(ABC):
         Number of columns in the forward operator.
     """
 
-    def __init__(self, tol, m, n):
+    def __init__(self, m: int, n: int, tol: float = 1e-2):
         # Validation for initialization parameters
         if m <= 0 or n <= 0:
             raise ValueError(
@@ -98,7 +100,7 @@ class UpdateRegBase(ABC):
                 self.func_history.append(func_value)
 
             self._run_convergence_checks()
-        self._print_status()
+        self._log_status()
 
     def _residual_filter(self, reg):
         """
@@ -213,7 +215,7 @@ class UpdateRegBase(ABC):
         rel_change = abs(self.regalpha_history[-1] - self.regalpha_history[-2]) / denom
 
         if rel_change < self.tol:
-            print(f"Alpha Saturation: Converged at iteration {self.iteration}")
+            log.debug(f"Alpha Saturation: Converged at iteration {self.iteration}")
             self.converged = True
 
     @abstractmethod
@@ -395,15 +397,14 @@ class UpdateRegBase(ABC):
             Tuple specifying the (min, max) range of regularization parameters to plot.
             If None, defaults to the class's regalpha_low and regalpha_high.
         """
-        print("Plotting function not implemented")
+        log.info("Plotting function not implemented")
 
-    def _print_status(self):
-        """Prints the current iteration status to the console."""
+    def _log_status(self):
+        """Logs the current iteration status."""
         val = f"{self.regalpha:.4e}" if self.regalpha else "N/A"
-        print(
+        log.info(
             f"Iteration {self.iteration}: regalpha = {val} [{self.rule_type.upper()}]"
         )
-
 
 class UpdateRegDiscrep(UpdateRegBase):
     r"""Discrepancy Principle for choosing the regularisation parameter :math:`\alpha`.
@@ -1008,7 +1009,7 @@ class UpdateRegGCV(UpdateRegBase):
     def _weighted_trace(self, regalpha, constrained_dofs):
         """
         Compute the weighted trace term in the GCV denominator:
-        trace(I - omega * A_alpha) = constrained_dofs + sum_i filt_i
+        trace(I - omega * A_alpha * A^{#}) = constrained_dofs + sum_i filt_i
         where filt_i = ((1 - omega) * sigma_i^2 + alpha^2) / (sigma_i^2 + alpha^2)
         """
         filt = ((1 - self.omega) * self.Sbsq + regalpha**2) / (self.Sbsq + regalpha**2)
@@ -1067,7 +1068,7 @@ class UpdateRegGCV(UpdateRegBase):
                 / abs(self.Ghat_history[0])
                 < self.tol
             ):
-                print(
+                log.debug(
                     "GHat: The regularisation parameter has converged at outer iteration",
                     self.iteration,
                 )
@@ -1079,7 +1080,7 @@ class UpdateRegGCV(UpdateRegBase):
                 self.iteration = np.argmin(self.Ghat_history)
                 self.regalpha = self.regalpha_history[self.iteration]
 
-                print(
+                log.debug(
                     "The regularisation parameter has converged at outer iteration",
                     self.iteration,
                 )
