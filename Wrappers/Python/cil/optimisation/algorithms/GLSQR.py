@@ -303,18 +303,9 @@ class GLSQR(Algorithm):
         x : DataContainer
             Current solution estimate.
         """
-        # Create a reference to the array we are modifying
-        w_arr = self.weight_operator.diagonal.array
-
-        # 1. Compute hypotenuse: sqrt(x**2 + tau**2)
-        np.hypot(x.array, self.tau, out=w_arr)
-
-        # 2. Compute the square root of that result in-place
-        np.sqrt(w_arr, out=w_arr)
-
-        # 3. Compute the reciprocal in-place
-        # Result: 1.0 / sqrt(hypot) which is (x^2 + tau^2)^-1/4
-        np.reciprocal(w_arr, out=w_arr)
+        x.power(2, out=self.weight_operator.diagonal) 
+        self.weight_operator.diagonal.add(self.tau**2, out=self.weight_operator.diagonal)
+        self.weight_operator.diagonal.power(-0.25, out=self.weight_operator.diagonal)
 
     def _perform_iteration(self):
         """Perform a single LSQR iteration of GLSQR with optional IRLS for L1."""
@@ -359,19 +350,20 @@ class GLSQR(Algorithm):
         self.u.sapyb(1.0, self.data, -1.0, out=self.u)  # u = Ax - b
 
         self.beta = self.u.norm()
-        self.u /= self.beta  # Problem if u is zero
+        self.u.divide(self.beta, out=self.u)  # Problem if u is zero
 
         # 3. Compute first vector in domain space: v = L_inv(A_adj(u))
         self.operator.adjoint(self.u, out=self.tmp_range)
         self.weight_operator.inverse(self.tmp_range, out=self.v)
 
         self.alpha = self.v.norm()
-        self.v /= self.alpha
+        self.v.divide(self.alpha, out=self.v)
 
-        # 4. Initialize scalars and search direction
+        # 4. Initialize scalars, search direction and residuals
         self.rhobar = self.alpha
         self.phibar = self.beta
         self.normr = self.beta
+        self.beta0 = self.beta
         self.res2 = 0.0
 
         # Copy v into d (initial search direction) without re-allocating
@@ -380,48 +372,52 @@ class GLSQR(Algorithm):
     def _GKB_step(self):
         """single iteration of GKB"""
         # Update u in GKB
-        self.operator.direct((self.weight_operator.inverse(self.v)), out=self.tmp_range)
+        self.weight_operator.inverse(self.v, out=self.tmp_domain)
+        self.operator.direct(self.tmp_domain, out=self.tmp_range)
         self.tmp_range.sapyb(1.0, self.u, -self.alpha, out=self.u)
         self.beta = self.u.norm()
-        self.u /= self.beta
+        self.u.divide(self.beta, out=self.u)
 
         # Update v in GKB
-        self.weight_operator.inverse(self.operator.adjoint(self.u), out=self.tmp_domain)
+        self.operator.adjoint(self.u, out=self.tmp_range)
+        self.weight_operator.inverse(self.tmp_range, out=self.tmp_domain)
         self.v.sapyb(-self.beta, self.tmp_domain, 1.0, out=self.v)
         self.alpha = self.v.norm()
-        self.v /= self.alpha
+        self.v.divide(self.alpha, out=self.v)
 
         # Eliminate diagonal from regularisation
         if self.regalpha == 0.0:  # No regularisation
             rhobar1 = self.rhobar
             psi = 0
         else:
-            rhobar1 = math.sqrt(self.rhobar * self.rhobar + self.regalpha**2)
+            rhobar1 = np.sqrt(self.rhobar * self.rhobar + self.regalpha**2)
             c1 = self.rhobar / rhobar1
             s1 = self.regalpha / rhobar1
             psi = s1 * self.phibar
             self.phibar = c1 * self.phibar
 
         # Eliminate lower bidiagonal part
-        rho = math.sqrt(rhobar1**2 + self.beta**2)
+        rho = np.sqrt(rhobar1**2 + self.beta**2)
         c = rhobar1 / rho
         s = self.beta / rho
         theta = s * self.alpha
         self.rhobar = -c * self.alpha
         phi = c * self.phibar
         self.phibar = s * self.phibar
-        self.thetainv = theta / rho
+        self.d_update_coeff = theta / rho
         self.step_coeff = phi / rho
 
         # Estimate residual norm
         self.res2 += psi**2
-        self.normr = math.sqrt(self.phibar**2 + self.res2)
+        self.normr = np.sqrt(self.phibar**2 + self.res2)
 
-        # Update image x
-        self.x.sapyb(1, self.d, self.step_coeff, out=self.x)
+        # 1. Update Solution: x = x + step_coeff * d
+        # (1 * x) + (step_coeff * d)
+        self.x.sapyb(1.0, self.d, self.step_coeff, out=self.x)
 
-        # Update search direction
-        self.d.sapyb(-self.thetainv, self.v, 1, out=self.d)
+        # 2. Update Search Direction: d = v - d_update_coeff * d
+        # (1 * v) + (-d_update_coeff * d)
+        self.v.sapyb(1.0, self.d, -self.d_update_coeff, out=self.d)
 
     def update_objective(self):
         """
@@ -433,9 +429,6 @@ class GLSQR(Algorithm):
 
     def _check_inner_stop(self, inner_it):
         """Check inner stopping criteria for IRLS"""
-        # Ensure beta0 exists (initial residual at start of inner loop)
-        if not hasattr(self, "beta0"):
-            self.beta0 = self.beta
 
         # Current image norm
         xnorm = self.x.norm()
