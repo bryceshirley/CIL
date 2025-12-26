@@ -17,11 +17,9 @@
 # CIL Developers and contributers, listed at: https://github.com/TomographicImaging/CIL/blob/master/NOTICE.txt
 from cil.framework import DataContainer
 from cil.optimisation.algorithms import Algorithm
-from cil.optimisation.operators import DiagonalOperator, IdentityOperator
-
+from cil.optimisation.operators import GLSQROperator
 import numpy as np
 import logging
-import math
 
 log = logging.getLogger(__name__)
 
@@ -43,60 +41,65 @@ class GLSQR(Algorithm):
 
     .. math::
 
-        \min_u \|A u - b\|_2^2 + \alpha^2 \|L u\|_2^2,
+        \min_u \|A u - b\|_2^2 + \alpha^2 \|\tilde{L} u\|_2^2,
 
-    where :math:`L` is a (possibly non-diagonal) linear operator acting on the unknown
-    :math:`u` (e.g., finite-difference gradient, Laplacian, wavelet transform, or
-    other structured operators).
+    where :math:`\tilde{L}=L_{\text{norm}} L_{\text{struct}}`.
 
-    Without assumptions on the structure of :math:`L`, this problem is equivalent
+    Without assumptions on the structure of :math:`L_{\text{struct}}`, this problem is equivalent
     to the standard-form Tikhonov problem (Chung and Gazzola, 2024):
 
     .. math::
 
         \bar{x}(\alpha)
         = \underset{\bar{x}}{\mathrm{argmin}}
-        \;\|A L_A^{\dagger} \bar{x} - \bar{b}\|_2^2
+        \;\|A \tilde{L}_A^{\dagger} \bar{x} - \bar{b}\|_2^2
         + \alpha^2 \|\bar{x}\|_2^2,
 
     where:
 
-    - :math:`L_A^{\dagger}
-        = \left(I - (A(I - L^\dagger L))^\dagger A\right) L^\dagger`
-    is the :math:`A`-weighted generalised inverse of :math:`L`.
+    - :math:`\tilde{L}_A^{\dagger}
+        = \left(I - (A(I - \tilde{L}^\dagger \tilde{L}))^\dagger A\right) \tilde{L}^\dagger`
+    is the :math:`A`-weighted generalised inverse of :math:`\tilde{L}`.
 
     - The solution to the original problem is recovered via
 
     .. math::
 
-        u(\alpha) = L_A^{\dagger} \bar{x}(\alpha) + u_0^L,
+        u(\alpha) = \tilde{L}_A^{\dagger} \bar{x}(\alpha) + u_0^{\tilde{L}},
 
-    where :math:`u_0^L` is the component of :math:`u` in the null space of :math:`L`.
+    where :math:`u_0^{\tilde{L}}` is the component of :math:`u` in the null space of :math:`\tilde{L}`.
 
     - The modified right-hand side is
 
     .. math::
 
-        \bar{b} = b - u_0^L.
+        \bar{b} = b - u_0^{\tilde{L}}.
 
-    Key Points
-    ----------
+    The operator :math:`\tilde{L}` is handled via the `GLSQROperator` class.
 
-    - **Standard GLSQR:** :math:`L = I`, giving the classic Tikhonov-regularised form
-    :math:`\|A x - b\|_2^2 + \alpha^2 \|x\|_2^2`.
+    The Norm Operator :math:`L_{\text{norm}}`
+    ------------------------------------------
+    The choice of :math:`L_{\text{norm}}` depends on the desired regular
 
-    - **Wavelet GLSQR:** :math:`L` is a wavelet transform operator. The inverse of :math:`L`
-    is then the corresponding inverse wavelet transform.
+    - **L2-norm:** :math:`L_{\text{norm}} = I`, giving the classic Tikhonov-regularised form.
 
-    - **L1-weighted GLSQR:** :math:`L` is diagonal (e.g., IRLS schemes for
-    approximate L1 regularisation). The inverse of :math:`L` is then the elementwise
-    reciprocal of its diagonal entries.
+    - **L1-norm:** :math:`L_{\text{norm}}` is diagonal iteratively reweighted operator to approximate
+        the L1 norm. The weights are updated at each outer iteration based on the current solution
+        estimate. 
 
-    - **General weighted GLSQR:** :math:`L` may represent gradient operators,
-    differential operators, or transforms (e.g., finite differences, wavelets).
-    In such cases, applying the weights requires using :math:`L`'s inverse or
-    pseudo-inverse rather than simple elementwise scaling.
+    The Structural Operator :math:`L_{\text{struct}}`
+    ------------------------------------------------
+    The choice of :math:`L_{\text{struct}}` depends on the desired regularisation structure:
 
+    - **Wavelets:** :math:`L_{\text{struct}}` is a wavelet transform operator.
+
+    - **Finite Differences:** :math:`L_{\text{struct}}` represents finite difference operators
+        for gradient-based regularisation (e.g., Total Variation).
+    
+    - **General:** :math:`L_{\text{struct}}` can be any linear operator that captures
+        the desired structural properties of the solution. 
+
+    The Structural Operator must have an `inverse` method implemented.
 
     Parameters
     ----------
@@ -136,7 +139,7 @@ class GLSQR(Algorithm):
         data: DataContainer,
         initial: DataContainer = None,
         reg_norm_type: str = "L2",
-        weight_operator=None,
+        struct_operator=None,
         regalpha: float = 0.0,
         maxoutit: int = 50,
         maxinit: int = 20,
@@ -162,9 +165,8 @@ class GLSQR(Algorithm):
         reg_norm_type : str, optional
             Type of regularisation norm ('L1' or 'L2'). Default is 'L2'.
         weight_operator : Operator, optional
-            Regularisation operator :math:`L`. The operator must have an inverse or pseudo-inverse
-            method implemented. If no weight_operator is provided, defaults to IdentityOperator
-            for 'L2' norm and DiagonalOperator for 'L1' norm.
+            Tikhonov weight operator :math:`L`. The operator must have an inverse or pseudo-inverse
+            method implemented. 
         maxoutit : int, optional
             Maximum number of outer iterations. Default is the size of the domain.
         maxinit : int, optional
@@ -199,10 +201,10 @@ class GLSQR(Algorithm):
             initial=initial,
             operator=operator,
             data=data,
-            weight_operator=weight_operator,
+            struct_operator=struct_operator,
         )
 
-    def set_up(self, initial, operator, data, weight_operator):
+    def set_up(self, initial, operator, data, struct_operator):
         """
         Set up the GLSQR algorithm with the problem definition.
 
@@ -214,6 +216,8 @@ class GLSQR(Algorithm):
             Linear operator representing the forward model.
         data : DataContainer
             Measured data.
+        struct_operator : Operator
+            Structural regularisation operator :math:`L_{\text{struct}}`.
         """
         log.info("%s setting up", self.__class__.__name__)
 
@@ -228,8 +232,14 @@ class GLSQR(Algorithm):
         domain_geom = self.operator.domain_geometry()
         range_geom = self.operator.range_geometry()
 
-        # 3. Define the weight operator (L)
-        self._set_up_weight_operator(weight_operator, domain_geom)
+        # 3. Define the regularisation operator (\tilde{L} = L_{\text{norm}} L_{\text{struct}})
+        self.weight_operator = GLSQROperator(domain_geometry=domain_geom,
+                                             range_geometry=range_geom,
+                                             struct_operator=struct_operator,
+                                             norm_type=self.reg_norm_type,
+                                             adapt_tau=True)
+        if self.reg_norm_type.upper() == "L1":
+            self.weight_operator.update_weights(self.initial)
 
         # 4. Allocate variables for iterations
         self.x = domain_geom.allocate(0)  # 2 domain
@@ -250,63 +260,6 @@ class GLSQR(Algorithm):
         # Perform GLSQR Iteration with optional IRLS regularisation for L1 norm
         self._perform_iteration()
 
-    def _set_up_weight_operator(self, weight_operator, geom):
-        """
-        Set up the weight operator :math:`L` for regularisation.
-        Parameters
-        ----------
-        weight_operator : Operator, optional
-            Regularisation operator :math:`L`. If not provided, defaults to IdentityOperator
-            for 'L2' norm and DiagonalOperator for 'L1' norm.
-        geom : Geometry
-            Geometry of the domain space for the weight operator.
-        Raises
-        -------
-        ValueError
-            If the provided weight_operator does not have an 'inverse' method.
-        ValueError
-            If an unknown reg_norm_type is specified.
-        """
-
-        # Select weight operator
-        if weight_operator is not None:
-            self.weight_operator = weight_operator
-        else:
-            # Select default weight operator based on reg_norm_type
-            if self.reg_norm_type.upper() == "L2":
-                self.weight_operator = IdentityOperator(geom)
-            elif self.reg_norm_type.upper() == "L1":
-                self.weight_operator = DiagonalOperator(geom)
-                self._update_irls_weights(self.initial)
-            else:
-                raise ValueError(
-                    f"Unknown reg_norm_type '{self.reg_norm_type}'. Supported types are 'L1' and 'L2'."
-                )
-
-        # Validate that the weight operator has an inverse method
-        if not hasattr(self.weight_operator, "inverse"):
-            raise ValueError(
-                "The provided weight_operator must have an 'inverse' method implemented."
-            )
-
-    def _update_irls_weights(self, x: DataContainer):
-        """
-        Update DiagonalOperator weights for IRLS L1 regularisation.
-
-        .. math::
-            w = (x^2 + \tau^2)^{-1/4}
-
-        Where :math:`\tau` is a small positive parameter to avoid singularities.
-
-        Parameters
-        ----------
-        x : DataContainer
-            Current solution estimate.
-        """
-        x.power(2, out=self.weight_operator.diagonal) 
-        self.weight_operator.diagonal.add(self.tau**2, out=self.weight_operator.diagonal)
-        self.weight_operator.diagonal.power(-0.25, out=self.weight_operator.diagonal)
-
     def _perform_iteration(self):
         """Perform a single LSQR iteration of GLSQR with optional IRLS for L1."""
         if self.reg_norm_type.upper() == "L1":
@@ -318,8 +271,8 @@ class GLSQR(Algorithm):
 
     def _run_irls_inner_loop(self):
         """Encapsulated inner loop for IRLS-style regularisation."""
-        # Reset GKB for the new weights
-        self._initialize_GKB()  # Maps initial to weighted space
+        # # Reset GKB for the new weights
+        # self._initialize_GKB()  # Maps initial to weighted space
 
         # Inner Loop
         for inner_it in range(self.maxinit):
@@ -328,11 +281,8 @@ class GLSQR(Algorithm):
             if self._check_inner_stop(inner_it):
                 break
 
-        # Transform back to original space
-        self.weight_operator.inverse(self.x, out=self.x)
-
         # Update weights for next outer iteration
-        self._update_irls_weights(self.x)
+        self.weight_operator.update_weights(self.x, in_transform_domain=True)
 
     def _initialize_GKB(self):
         """
@@ -467,9 +417,7 @@ class GLSQR(Algorithm):
     def get_output(self):
         r"""Returns the current solution.
 
-        For L2 regularisation, the solution is mapped back to the original space
-        using the inverse of the weight operator. For L1 regularisation, the
-        solution is already in the original space.
+        The solution is mapped back to the image space via the inverse of the weight operator.
 
         Returns
         -------
@@ -478,7 +426,4 @@ class GLSQR(Algorithm):
 
         """
         # Map back to original space
-        if self.reg_norm_type.upper() == "L2":
-            return self.weight_operator.inverse(self.x)
-        elif self.reg_norm_type.upper() == "L1":
-            return self.x
+        return self.weight_operator.inverse(self.x)
