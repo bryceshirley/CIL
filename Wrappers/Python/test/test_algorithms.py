@@ -35,11 +35,9 @@ from cil.optimisation.algorithms.APGD import NesterovMomentum, ScalarMomentumCoe
 from cil.optimisation.operators import IdentityOperator, AdjointOperator
 from cil.optimisation.operators import GradientOperator, BlockOperator, MatrixOperator, WaveletOperator
 
-
-
 from cil.optimisation.functions import MixedL21Norm, BlockFunction, L1Norm, KullbackLeibler, IndicatorBox, LeastSquares, ZeroFunction, L2NormSquared, OperatorCompositionFunction, TotalVariation, SGFunction, SVRGFunction, SAGAFunction, SAGFunction, LSVRGFunction, ScaledFunction
-from cil.optimisation.algorithms import Algorithm, GD, CGLS, SIRT, FISTA, ISTA, SPDHG, PDHG, LADMM, PD3O, PGD, APGD , LSQR, GLSQR
-
+from cil.optimisation.algorithms import Algorithm, GD, CGLS, SIRT, FISTA, ISTA, SPDHG, PDHG, LADMM, PD3O, PGD, APGD , LSQR, GLSQR, HybridGLSQR
+from cil.optimisation.utilities.HybridUpdateReg import UpdateRegGCV
 
 from scipy.optimize import minimize, rosen
 
@@ -2317,3 +2315,93 @@ class TestGLSQR(CCPiTestClass):
         self.assertNumpyArrayAlmostEqual(glsqr.v.as_array(), v_new.as_array())
         self.assertNumpyArrayAlmostEqual(glsqr.x.as_array(), expected_x.as_array())
         self.assertNumpyArrayAlmostEqual(glsqr.d.as_array(), expected_d.as_array())
+
+
+class TestHybridGLSQR(CCPiTestClass):
+    def setUp(self):
+        np.random.seed(10)
+        self.n, self.m = 50, 70
+        
+        # Create a blurred/noisy system
+        A = np.random.uniform(0, 1, (self.m, self.n)).astype('float32')
+        self.Aop = MatrixOperator(A)
+        
+        # True solution is a simple box signal
+        self.x_true = self.Aop.domain_geometry().allocate(0)
+        self.x_true.as_array()[20:30] = 1.0
+        
+        # Add noise to data
+        self.b = self.Aop.direct(self.x_true)
+        noise = self.b.copy()
+        noise.fill(np.random.normal(0, 0.05, self.m))
+        self.b += noise
+
+        self.data_size = self.b.size
+        self.domain_size = self.x_true.size
+
+    def test_projected_operator_structure(self):
+        """Verify that Bk is a (k+1) x k bidiagonal matrix."""
+        # Use a small number of iterations for the structure check
+        iterations = 3
+        hybrid = HybridGLSQR(operator=self.Aop, data=self.b, maxoutit=iterations + 1)
+        
+        for _ in range(iterations):
+            hybrid.update()
+            
+            # Capture the state AFTER update
+            k = hybrid.k
+            Bk = hybrid._build_projected_operator()
+            print(f"Iteration {k}, Bk shape: {Bk.shape}")
+            
+            # 1. Check dimensions (k+1) x k
+            # k=1 -> (2,1); k=2 -> (3,2); k=3 -> (4,3)
+            self.assertEqual(Bk.shape, (k + 1, k))
+            
+            # 2. Check bidiagonal values
+            # Main diagonal: alpha_1 ... alpha_k
+            np.testing.assert_array_almost_equal(
+                np.diag(Bk), 
+                hybrid.alphavec[:k], 
+                err_msg=f"Alpha mismatch at iteration {k}"
+            )
+            
+            # Sub-diagonal: beta_2 ... beta_{k+1}
+            # np.diag(Bk, k=-1) extracts the sub-diagonal
+            np.testing.assert_array_almost_equal(
+                np.diag(Bk, k=-1), 
+                hybrid.betavec[1:k+1], 
+                err_msg=f"Beta mismatch at iteration {k}"
+            )
+
+    def test_gcv_parameter_update(self):
+        """Verify that regalpha changes over iterations when using GCV."""
+        hybrid = HybridGLSQR(operator=self.Aop, data=self.b, maxoutit=10)
+        
+        initial_alpha = hybrid.regalpha
+        hybrid.run(5)
+        
+        # In a noisy problem, GCV should have selected a non-zero alpha
+        self.assertNotEqual(hybrid.regalpha, initial_alpha)
+        self.assertGreater(hybrid.regalpha, 0)
+        
+        # Check that the rule and the algorithm are in sync
+        self.assertEqual(hybrid.regalpha, hybrid.reg_rule.regalpha)
+
+    def test_custom_reg_rule(self):
+        """Test initialization with a pre-configured GCV rule."""
+        custom_rule = UpdateRegGCV(data_size=self.data_size, domain_size=self.domain_size, 
+                                   adaptive_weight=False, gcv_weight=0.5)
+        hybrid = HybridGLSQR(operator=self.Aop, data=self.b, hybrid_reg_rule=custom_rule)
+        
+        self.assertEqual(hybrid.reg_rule.omega, 0.5)
+        self.assertTrue(hybrid.reg_rule.gcv_type == 'weighted')
+
+    def test_stop_iteration_on_convergence(self):
+        """Verify the algorithm raises StopIteration when the rule converges."""
+        hybrid = HybridGLSQR(operator=self.Aop, data=self.b, maxoutit=20)
+        
+        # Manually force convergence in the rule
+        hybrid.reg_rule.converged = True
+        
+        with self.assertRaises(StopIteration):
+            hybrid.update_objective()

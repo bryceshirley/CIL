@@ -97,7 +97,8 @@ class GLSQR(Algorithm):
         for gradient-based regularisation (e.g., Total Variation).
 
     - **General:** :math:`L_{\text{struct}}` can be any linear operator that captures
-        the desired structural properties of the solution.
+        the desired structural properties of the solution and has an inverse or pseudo-inverse 
+        method implemented.
 
     The Structural Operator must have an `inverse` method implemented.
 
@@ -202,9 +203,10 @@ class GLSQR(Algorithm):
             operator=operator,
             data=data,
             struct_operator=struct_operator,
+            **kwargs,
         )
 
-    def set_up(self, initial, operator, data, struct_operator):
+    def set_up(self, initial, operator, data, struct_operator, **kwargs):
         """
         Set up the GLSQR algorithm with the problem definition.
 
