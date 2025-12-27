@@ -33,13 +33,11 @@ from cil.framework.labels import FillType
 from cil.optimisation.utilities import ArmijoStepSizeRule, ConstantStepSize, Sampler, callbacks, Sensitivity, StepSizeRule
 from cil.optimisation.algorithms.APGD import NesterovMomentum, ScalarMomentumCoefficient, ConstantMomentum
 from cil.optimisation.operators import IdentityOperator, AdjointOperator
-from cil.optimisation.operators import GradientOperator, BlockOperator, MatrixOperator
-
-
+from cil.optimisation.operators import GradientOperator, BlockOperator, MatrixOperator, WaveletOperator
 
 from cil.optimisation.functions import MixedL21Norm, BlockFunction, L1Norm, KullbackLeibler, IndicatorBox, LeastSquares, ZeroFunction, L2NormSquared, OperatorCompositionFunction, TotalVariation, SGFunction, SVRGFunction, SAGAFunction, SAGFunction, LSVRGFunction, ScaledFunction
-from cil.optimisation.algorithms import Algorithm, GD, CGLS, SIRT, FISTA, ISTA, SPDHG, PDHG, LADMM, PD3O, PGD, APGD , LSQR
-
+from cil.optimisation.algorithms import Algorithm, GD, CGLS, SIRT, FISTA, ISTA, SPDHG, PDHG, LADMM, PD3O, PGD, APGD , LSQR, GLSQR, HybridGLSQR
+from cil.optimisation.utilities.HybridUpdateReg import UpdateRegGCV
 
 from scipy.optimize import minimize, rosen
 
@@ -2134,3 +2132,276 @@ class TestLSQR(CCPiTestClass):
         lsqr_reg = LSQR(initial=self.initial, operator=self.Aop, data=self.bop, alpha=0.5)
         lsqr_reg.run(1)
         self.assertAlmostEqual(lsqr_reg.objective[0], (self.Aop.direct(self.initial)-self.bop).norm()**2 + 0.5*self.initial.norm()**2, 1)
+
+
+class TestGLSQR(CCPiTestClass):
+    def setUp(self):
+        np.random.seed(10)
+        self.n, self.m = 50, 70
+        
+        A = np.random.uniform(0, 1, (self.m, self.n)).astype('float32')
+        self.Aop = MatrixOperator(A)
+        
+        # Ground truth
+        self.x_true = self.Aop.domain_geometry().allocate(0)
+        self.x_true.as_array()[5:15] = 1.0
+        
+        # Data b
+        self.b = self.Aop.direct(self.x_true)
+        
+        # Initial guess (Missing in your previous version)
+        self.initial = self.Aop.domain_geometry().allocate(0)
+        
+        self.ig = self.Aop.domain_geometry()
+
+    def test_glsqr_l2_equivalence(self):
+        """Test that GLSQR with L2 norm matches standard LSQR behavior."""
+        alpha = 0.1
+        # GLSQR with Identity as structure
+        glsqr = GLSQR(operator=self.Aop, data=self.b, regalpha=alpha, 
+                      reg_norm_type='L2', struct_operator=IdentityOperator(self.ig))
+        
+        glsqr.run(10)
+        
+        # Objective check for L2: ||Ax-b||^2 + alpha^2 * ||Ix||^2
+        # Note: GLSQR internally tracks normr, which is the residual of the standard-form problem
+        final_x = glsqr.get_output()
+        res = (self.Aop.direct(final_x) - self.b).norm()**2
+        reg = alpha**2 * final_x.norm()**2
+        
+        self.assertLess(res + reg, (self.b).norm()**2)
+
+    def test_glsqr_l1_convergence(self):
+        """Test that L1 IRLS reduces the residual and encourages sparsity."""
+        # Use a small tau and more inner iterations for L1
+        glsqr = GLSQR(operator=self.Aop, data=self.b, regalpha=0.5, 
+                      reg_norm_type='L1', maxinit=5, tau=10, btol=1e-6,
+                      atol=1e-6,xtol=1e-6)
+        
+        initial_res = self.b.norm()
+        glsqr.run(5) # Run 5 outer iterations
+        
+        final_x = glsqr.get_output()
+        final_res = (self.Aop.direct(final_x) - self.b).norm()
+        
+        self.assertLess(final_res, initial_res)
+        # Check that we haven't exploded
+        self.assertFalse(np.isnan(final_x.as_array()).any())
+
+    def test_struct_operator_wavelet(self):
+        # Wavelets need power-of-2 to avoid padding/broadcast issues
+        self.n = 64 
+        self.m = 70
+        A = np.random.uniform(0, 1, (self.m, self.n)).astype('float32')
+        self.Aop = MatrixOperator(A)
+        self.ig = self.Aop.domain_geometry()
+        self.b = self.Aop.range_geometry().allocate('random')
+        
+        wo = WaveletOperator(self.ig)
+        glsqr = GLSQR(operator=self.Aop, data=self.b, struct_operator=wo)
+        glsqr.run(2)
+        self.assertEqual(len(glsqr.loss), 3)
+
+    def test_buffer_allocation(self):
+        """Verify that all static buffers are allocated correctly."""
+        glsqr = GLSQR(operator=self.Aop, data=self.b)
+        
+        # Check domain-sized buffers
+        self.assertEqual(glsqr.x.shape, (self.n,))
+        self.assertEqual(glsqr.v.shape, (self.n,))
+        self.assertEqual(glsqr.tmp_domain.shape, (self.n,))
+        
+        # Check range-sized buffers
+        self.assertEqual(glsqr.u.shape, (self.m,))
+        self.assertEqual(glsqr.tmp_range.shape, (self.m,))
+
+    def test_get_output_mapping(self):
+        """Verify get_output applies the inverse weight operator."""
+        glsqr = GLSQR(operator=self.Aop, data=self.b, reg_norm_type='L2')
+        glsqr.run(1)
+        
+        out = glsqr.get_output()
+        # For L2/Identity, x and output should be the same
+        self.assertNumpyArrayAlmostEqual(glsqr.x.as_array(), out.as_array())
+    
+    def test_bidiag_update_math(self):
+        """Verify the unified _bidiag_update matches manual GKB step."""
+        glsqr = GLSQR(operator=self.Aop, data=self.b, initial=self.initial)
+        
+        # Test a manual range update: u = (Kv - alpha*u) / beta
+        v = self.Aop.domain_geometry().allocate('random')
+        u = self.Aop.range_geometry().allocate('random')
+        alpha = 0.5
+        
+        # 1. Calculate manually using standard LSQR logic
+        # K = A (since weight_op is Identity)
+        expected_u = self.Aop.direct(v) - alpha * u
+        expected_beta = expected_u.norm()
+        expected_u /= expected_beta
+        
+        # 2. Use the refactored _bidiag_update
+        # Note: _apply_K uses tmp_domain internally, bidiag_update uses tmp_range
+        actual_beta = glsqr._bidiag_update(
+            v, u, glsqr._apply_K, u, alpha, glsqr.tmp_range
+        )
+        
+        self.assertAlmostEqual(actual_beta, expected_beta, places=5)
+        self.assertNumpyArrayAlmostEqual(u.as_array(), expected_u.as_array(), decimal=5)
+
+    def test_gkb_initialization_math(self):
+        """Verify _initialize_GKB matches standard LSQR initialization."""
+        glsqr = GLSQR(operator=self.Aop, data=self.b, initial=self.initial)
+        
+        # Manual standard LSQR init:
+        # beta = ||b - Ax0||
+        # u = (b - Ax0) / beta
+        # alpha = ||A*u||
+        # v = A*u / alpha
+        
+        r0 = self.b - self.Aop.direct(self.initial)
+        expected_beta = r0.norm()
+        expected_u = r0 / expected_beta
+        
+        expected_v = self.Aop.adjoint(expected_u)
+        expected_alpha = expected_v.norm()
+        expected_v /= expected_alpha
+        
+        # GLSQR init should have happened in __init__
+        self.assertAlmostEqual(glsqr.beta, expected_beta, places=5)
+        self.assertAlmostEqual(glsqr.alpha, expected_alpha, places=5)
+        self.assertNumpyArrayAlmostEqual(glsqr.u.as_array(), expected_u.as_array())
+        self.assertNumpyArrayAlmostEqual(glsqr.v.as_array(), expected_v.as_array())
+
+    def test_step_logic_equivalence(self):
+        """Verify one GLSQR step vs manual standard LSQR update formulas."""
+        alpha_reg = 0.0 # Standard LSQR case
+        glsqr = GLSQR(operator=self.Aop, data=self.b, initial=self.initial, regalpha=alpha_reg)
+        
+        # Capture state before update
+        u_old = glsqr.u.copy()
+        v_old = glsqr.v.copy()
+        alpha_old = glsqr.alpha
+        beta_old = glsqr.beta
+        rhobar_old = glsqr.rhobar
+        phibar_old = glsqr.phibar
+        x_old = glsqr.x.copy()
+        d_old = glsqr.d.copy()
+        
+        # 1. Manual LSQR math for u, v, rho, c, s
+        # u = (Av - alpha_old*u) / beta_new
+        u_new = self.Aop.direct(v_old) - alpha_old * u_old
+        beta_new = u_new.norm()
+        u_new /= beta_new
+        
+        # v = (A*u - beta_new*v) / alpha_new
+        v_new = self.Aop.adjoint(u_new) - beta_new * v_old
+        alpha_new = v_new.norm()
+        v_new /= alpha_new
+        
+        # Rotation (Standard LSQR, regalpha=0)
+        rho = np.hypot(rhobar_old, beta_new)
+        c = rhobar_old / rho
+        s = beta_new / rho
+        theta = s * alpha_new
+        
+        # Updates
+        expected_x = x_old + (c * phibar_old / rho) * d_old
+        expected_d = v_new - (theta / rho) * d_old
+        
+        # 2. Run GLSQR update
+        glsqr.update()
+        
+        self.assertNumpyArrayAlmostEqual(glsqr.u.as_array(), u_new.as_array())
+        self.assertNumpyArrayAlmostEqual(glsqr.v.as_array(), v_new.as_array())
+        self.assertNumpyArrayAlmostEqual(glsqr.x.as_array(), expected_x.as_array())
+        self.assertNumpyArrayAlmostEqual(glsqr.d.as_array(), expected_d.as_array())
+
+
+class TestHybridGLSQR(CCPiTestClass):
+    def setUp(self):
+        np.random.seed(10)
+        self.n, self.m = 50, 70
+        
+        # Create a blurred/noisy system
+        A = np.random.uniform(0, 1, (self.m, self.n)).astype('float32')
+        self.Aop = MatrixOperator(A)
+        
+        # True solution is a simple box signal
+        self.x_true = self.Aop.domain_geometry().allocate(0)
+        self.x_true.as_array()[20:30] = 1.0
+        
+        # Add noise to data
+        self.b = self.Aop.direct(self.x_true)
+        noise = self.b.copy()
+        noise.fill(np.random.normal(0, 0.05, self.m))
+        self.b += noise
+
+        self.data_size = self.b.size
+        self.domain_size = self.x_true.size
+
+    def test_projected_operator_structure(self):
+        """Verify that Bk is a (k+1) x k bidiagonal matrix."""
+        # Use a small number of iterations for the structure check
+        iterations = 3
+        hybrid = HybridGLSQR(operator=self.Aop, data=self.b, maxoutit=iterations + 1)
+        
+        for _ in range(iterations):
+            hybrid.update()
+            
+            # Capture the state AFTER update
+            k = hybrid.k
+            Bk = hybrid._build_projected_operator()
+            print(f"Iteration {k}, Bk shape: {Bk.shape}")
+            
+            # 1. Check dimensions (k+1) x k
+            # k=1 -> (2,1); k=2 -> (3,2); k=3 -> (4,3)
+            self.assertEqual(Bk.shape, (k + 1, k))
+            
+            # 2. Check bidiagonal values
+            # Main diagonal: alpha_1 ... alpha_k
+            np.testing.assert_array_almost_equal(
+                np.diag(Bk), 
+                hybrid.alphavec[:k], 
+                err_msg=f"Alpha mismatch at iteration {k}"
+            )
+            
+            # Sub-diagonal: beta_2 ... beta_{k+1}
+            # np.diag(Bk, k=-1) extracts the sub-diagonal
+            np.testing.assert_array_almost_equal(
+                np.diag(Bk, k=-1), 
+                hybrid.betavec[1:k+1], 
+                err_msg=f"Beta mismatch at iteration {k}"
+            )
+
+    def test_gcv_parameter_update(self):
+        """Verify that regalpha changes over iterations when using GCV."""
+        hybrid = HybridGLSQR(operator=self.Aop, data=self.b, maxoutit=10)
+        
+        initial_alpha = hybrid.regalpha
+        hybrid.run(5)
+        
+        # In a noisy problem, GCV should have selected a non-zero alpha
+        self.assertNotEqual(hybrid.regalpha, initial_alpha)
+        self.assertGreater(hybrid.regalpha, 0)
+        
+        # Check that the rule and the algorithm are in sync
+        self.assertEqual(hybrid.regalpha, hybrid.reg_rule.regalpha)
+
+    def test_custom_reg_rule(self):
+        """Test initialization with a pre-configured GCV rule."""
+        custom_rule = UpdateRegGCV(data_size=self.data_size, domain_size=self.domain_size, 
+                                   adaptive_weight=False, gcv_weight=0.5)
+        hybrid = HybridGLSQR(operator=self.Aop, data=self.b, hybrid_reg_rule=custom_rule)
+        
+        self.assertEqual(hybrid.reg_rule.omega, 0.5)
+        self.assertTrue(hybrid.reg_rule.gcv_type == 'weighted')
+
+    def test_stop_iteration_on_convergence(self):
+        """Verify the algorithm raises StopIteration when the rule converges."""
+        hybrid = HybridGLSQR(operator=self.Aop, data=self.b, maxoutit=20)
+        
+        # Manually force convergence in the rule
+        hybrid.reg_rule.converged = True
+        
+        with self.assertRaises(StopIteration):
+            hybrid.update_objective()

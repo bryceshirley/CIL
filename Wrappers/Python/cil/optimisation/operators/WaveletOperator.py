@@ -101,7 +101,8 @@ class WaveletOperator(LinearOperator):
         self._trueAdj = kwargs.get('true_adjoint', True)
 
         self.wname = wname
-        self._wavelet = pywt.Wavelet(wname)
+        self._natural_wavelet = pywt.Wavelet(wname) # Standard wavelet
+        self._wavelet = self._natural_wavelet
         # True adjoint for biorthogonal wavelet
         if all([not self._wavelet.orthogonal, self._wavelet.biorthogonal, self._trueAdj]):
             self._wavelet = self._getBiortFilters(wname)
@@ -211,6 +212,41 @@ class WaveletOperator(LinearOperator):
         else:
             out.fill(Wx)
             return out
+        
+    def _reconstruct(self, Wx, wavelet, out=None):
+        r"""Helper function to reconstruct from wavelet coefficients using specified wavelet
+        Parameters
+        ----------
+        Wx : DataContainer
+            Wavelet coefficients
+        wavelet : pywt.Wavelet
+            Wavelet to use for reconstruction
+        out: return DataContainer, if None a new DataContainer is returned, default None.
+
+        Returns
+        --------
+        DataContainer, the reconstructed data or `None` if `out`
+        """
+        if not (self._wavelet.orthogonal or self._wavelet.biorthogonal):
+            raise ValueError(
+                'CIL currently only supports orthogonal and biorthogonal wavelets')
+    
+        Wx_arr = Wx.as_array()
+        coeffs = pywt.array_to_coeffs(Wx_arr, self._slices)
+
+        x = pywt.waverecn(
+            coeffs, wavelet=wavelet, axes=self.axes, mode=self.bnd_cond)
+
+        # Need to slice the output in case original size is of odd length
+        org_size = tuple(slice(i) for i in self.domain_geometry().shape)
+
+        if out is None:
+            ret = self.domain_geometry().allocate(dtype=Wx.dtype)
+            ret.fill(x[org_size])
+            return ret
+        else:
+            out.fill(x[org_size])
+            return out
 
     def adjoint(self, Wx, out=None):
         r"""Returns the value of the adjoint of the WaveletOperator applied to :math:`x`
@@ -227,27 +263,26 @@ class WaveletOperator(LinearOperator):
         DataContainer, the value of the adjoint of the WaveletOperator applied to :math:`x` or `None` if `out`
 
         """
+        # Adjoint needs a modified wavelet for biorthogonal case
+        return self._reconstruct(Wx, self._wavelet, out=out)
 
-        if not (self._wavelet.orthogonal or self._wavelet.biorthogonal):
-            raise ValueError(
-                'CIL currently only supports orthogonal and biorthogonal wavelets')
+    def inverse(self, Wx, out=None):
+        r"""Returns the value of the inverse of the WaveletOperator applied to :math:`x`
 
-        Wx_arr = Wx.as_array()
-        coeffs = pywt.array_to_coeffs(Wx_arr, self._slices)
 
-        x = pywt.waverecn(
-            coeffs, wavelet=self._wavelet, axes=self.axes, mode=self.bnd_cond)
+        Parameters
+        ----------
+        x : DataContainer
 
-        # Need to slice the output in case original size is of odd length
-        org_size = tuple(slice(i) for i in self.domain_geometry().shape)
+        out: return DataContainer, if None a new DataContainer is returned, default None.
 
-        if out is None:
-            ret = self.domain_geometry().allocate(dtype=Wx.dtype)
-            ret.fill(x[org_size])
-            return ret
-        else:
-            out.fill(x[org_size])
-            return out
+        Returns
+        --------
+        DataContainer, the value of the inverse of the WaveletOperator applied to :math:`x` or `None` if `out`
+
+        """
+        # Inverse always uses the natural wavelet
+        return self._reconstruct(Wx, self._natural_wavelet, out=out)
 
     def calculate_norm(self):
         '''Returns the norm of WaveletOperator, which is equal to 1.0 if the wavelet is orthogonal

@@ -234,6 +234,23 @@ class TestWavelets(CCPiTestClass):
                 M = x.norm() # Normalization
                 self.assertAlmostEqual(ip1/M, ip2/M, places=5, msg="Periodization convolution should be closest to true adjoint")
     
+    def test_wavelet_inverse_full(self):
+        m, n = 48, 64
+        dg = ImageGeometry(voxel_num_x=m, voxel_num_y=n)
+        x = dg.allocate('random', seed=3)
+        for wname in ['haar', 'db2', 'db3', 'db4', 'sym2', 'sym3', 'coif2', 'coif3', 'bior3.5', 'bior3.3', 'rbio3.5', 'rbio3.3']:
+            with self.subTest(wname=wname):
+                W = WaveletOperator(dg, wname=wname, level=2, bnd_cond='periodization')
+                
+                # Forward then Backward
+                x_recov = W.inverse(W.direct(x))
+                
+                # Check reconstruction precision
+                # Updated Check reconstruction precision
+                M = x.norm()
+                diff_norm = (x_recov - x).norm() / M
+                self.assertAlmostEqual(diff_norm, 0, places=5, msg=f"Failed perfect reconstruction for {wname}")
+
     def test_WaveletOperator_norm(self):
         n = 64
         dg = VectorGeometry(n)
