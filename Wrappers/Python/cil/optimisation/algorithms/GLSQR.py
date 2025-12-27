@@ -145,9 +145,10 @@ class GLSQR(Algorithm):
         maxoutit: int = 50,
         maxinit: int = 20,
         tau: float = 1e-3,
-        atol: float = 1e-1,
-        btol: float = 1e-1,
-        xtol: float = 1e-1,
+        atol: float = 1e-3,
+        btol: float = 1e-3,
+        xtol: float = 1e-3,
+        reinitialize_GKB: bool = True,
         **kwargs,
     ):
         """
@@ -196,6 +197,7 @@ class GLSQR(Algorithm):
         self.atol = atol
         self.btol = btol
         self.xtol = xtol
+        self.reinitialize_GKB = reinitialize_GKB
 
         # Initialise the algorithm
         self.set_up(
@@ -275,7 +277,8 @@ class GLSQR(Algorithm):
     def _run_irls_inner_loop(self):
         """Encapsulated inner loop for IRLS-style regularisation."""
         # Reset GKB for the new weights
-        self._initialize_GKB()  # Maps initial to weighted space
+        if self.reinitialize_GKB:
+            self._initialize_GKB()  # Maps initial to weighted space
 
         # Inner Loop
         for inner_it in range(self.maxinit):
