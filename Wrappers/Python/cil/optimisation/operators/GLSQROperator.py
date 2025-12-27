@@ -17,24 +17,36 @@
 # CIL Developers, listed at: https://github.com/TomographicImaging/CIL/blob/master/NOTICE.txt
 
 from cil.framework.data_container import DataContainer
-from cil.optimisation.operators import LinearOperator, DiagonalOperator, IdentityOperator
-import numpy as np
+from cil.optimisation.operators import (
+    LinearOperator,
+    DiagonalOperator,
+    IdentityOperator,
+)
 import warnings
 import logging
 
 log = logging.getLogger(__name__)
 
+
 class GLSQROperator(LinearOperator):
-    r''' `GLSQROperator`: :math:`\tilde{L}`
+    r"""`GLSQROperator`: :math:`\tilde{L}`
 
                    :math:`X` : domain
                    :math:`Y` : range
-            
+
     Handles the transformation of non-standard Tikhonov regularization problems into
     standard form for use with the `GLSQR` algorithm allowing for flexible regularisation
     structures and norms.
-    
-    Acts as the composite :math:`\tilde{L} = L_{\text{norm}} L_{\text{struct}}`.
+
+    .. math::
+        \tilde{L}(x) = L_{\text{norm}}(L_{\text{struct}}(x))
+
+    where :math:`L_{\text{norm}}` defines the norm type (L1 or L2) and
+    :math:`L_{\text{struct}}` defines the structural properties of the regularisation
+    (e.g., wavelets, finite differences).
+
+    .. math::`L_{\text{norm}}` has domain and range :math:`Y`
+    .. math::`L_{\text{struct}}` has domain :math:`X` and range :math:`Y`
 
     The Norm Operator :math:`L_{\text{norm}}`
     ------------------------------------------
@@ -58,9 +70,9 @@ class GLSQROperator(LinearOperator):
 
     - **Finite Differences:** :math:`L_{\text{struct}}` represents finite difference operators
         for gradient-based regularisation (e.g., Total Variation).
-    
+
     - **General:** :math:`L_{\text{struct}}` can be any linear operator that captures
-        the desired structural properties of the solution. 
+        the desired structural properties of the solution.
 
     The Structural Operator must have an `inverse` method implemented.
 
@@ -77,25 +89,27 @@ class GLSQROperator(LinearOperator):
     tau: float, optional
         Smoothing parameter for IRLS L1 regularisation. Default is 1e-3
     adapt_tau: bool, optional
-        If True, adapt tau during weight updates. Default is False.
+        If True, adapt tau during weight updates. Default is True.
     tau_mode: str, optional
-        Mode for adapting tau. Options are 'factor' (default) or 'solution_norm'.
+        Mode for adapting tau. Options are 'chartrand' (default) and only implemented mode.
     tau_factor: float, optional
         Factor for adapting tau. Default is 0.9.
     tau_min: float, optional
         Minimum value for tau during adaptation. Default is 1e-6.
-    '''
+    """
 
-
-    def __init__(self, domain_geometry, range_geometry=None,
-                 struct_operator=None,
-                 norm_type: str = "L2",
-                 tau: float = 1,
-                 adapt_tau: bool = False,
-                 tau_mode: str = 'factor',
-                 tau_factor: float = 0.1,
-                 tau_min: float = 1e-8):
-        
+    def __init__(
+        self,
+        domain_geometry,
+        range_geometry=None,
+        struct_operator=None,
+        norm_type: str = "L2",
+        tau: float = 1,
+        adapt_tau: bool = True,
+        tau_mode: str = "factor",
+        tau_factor: float = 0.1,
+        tau_min: float = 1e-8,
+    ):
         # Parameters for IRLS L1 regularisation
         self.tau = tau
         self.adapt_tau = adapt_tau
@@ -108,7 +122,7 @@ class GLSQROperator(LinearOperator):
         # Validate tau adaptation parameters
         if self.tau <= 0:
             raise ValueError("tau must be positive.")
-        if self.tau_mode not in ['factor', 'solution_norm']:
+        if self.tau_mode not in ["factor", "solution_norm"]:
             raise ValueError(
                 f"Unknown tau_mode '{self.tau_mode}'. Supported modes are 'factor' and 'solution_norm'."
             )
@@ -119,7 +133,7 @@ class GLSQROperator(LinearOperator):
 
         # Set structural operator
         if struct_operator is not None:
-            self.L_struct = struct_operator 
+            self.L_struct = struct_operator
         else:
             self.L_struct = IdentityOperator(domain_geometry)
 
@@ -128,44 +142,44 @@ class GLSQROperator(LinearOperator):
             raise ValueError(
                 "The provided structural_operator must have an 'inverse' method implemented."
             )
-        
+
         # Set norm type
         self.norm_type = norm_type.upper()
 
+        # 1. Determine the range geometry
         if range_geometry is None:
             range_geometry = self.L_struct.range_geometry()
 
-        # Select default norm operator
+        # 2. Select and initialize the norm operator
         if self.norm_type == "L2":
             self.L_norm = IdentityOperator(range_geometry)
         elif self.norm_type == "L1":
-            self.L_norm = DiagonalOperator(range_geometry)
-            self.L_norm.diagonal.fill(self.tau**-0.5) # Initial weights
+            # FIX: Pass an allocated DataContainer, not the geometry itself
+            initial_weights = range_geometry.allocate(self.tau**-0.5)
+            self.L_norm = DiagonalOperator(initial_weights)
         else:
-            raise ValueError(
-                f"Unknown norm_type '{self.norm_type}'. Supported types are 'L1' and 'L2'."
-            )
+            raise ValueError(f"Unknown norm_type '{self.norm_type}'")
 
-        super(GLSQROperator, self).__init__(domain_geometry=domain_geometry,
-                                       range_geometry=range_geometry)
+        super(GLSQROperator, self).__init__(
+            domain_geometry=domain_geometry, range_geometry=range_geometry
+        )
 
-    def direct(self,x,out=None):
+    def direct(self, x, out=None):
+        r"""Returns the :math:`\tilde{L}(x) = L_{\text{norm}}(L_{\text{struct}}(x))`
 
-        r'''Returns the :math:`\tilde{L}(x) = L_{\text{norm}}(L_{\text{struct}}(x))`
-        
         Parameters
         ----------
         x : DataContainer or BlockDataContainer
             Input data
         out : DataContainer or BlockDataContainer, optional
             If out is not None the output of the Operator will be filled in out, otherwise a new object is instantiated and returned. The default is None.
-        
+
         Returns
         -------
         DataContainer or BlockDataContainer
             :math:`\tilde{L}(x) = L_{\text{norm}}(L_{\text{struct}}(x))`
-            
-        '''
+
+        """
         if out is None:
             temp = self.L_struct.direct(x)
             return self.L_norm.direct(temp)
@@ -173,29 +187,29 @@ class GLSQROperator(LinearOperator):
             self.L_struct.direct(x, out=out)
             return self.L_norm.direct(out, out=out)
 
-    def adjoint(self,x, out=None):
-        r'''Returns the adjoint :math:`\tilde{L}^*(x)=L_{\text{struct}}^*(L_{\text{norm}}^*(x))`
-        
+    def adjoint(self, x, out=None):
+        r"""Returns the adjoint :math:`\tilde{L}^*(x)=L_{\text{struct}}^*(L_{\text{norm}}^*(x))`
+
         Parameters
         ----------
         x : DataContainer or BlockDataContainer
             Input data
         out : DataContainer or BlockDataContainer, optional
             If out is not None the output of the Operator will be filled in out, otherwise a new object is instantiated and returned. The default is None.
-            
+
         Returns
         -------
         DataContainer or BlockDataContainer
             :math:`\mathrm{Id}^*(x)=L_{\text{struct}}^*(L_{\text{norm}}^*(x))`
-        
-        '''
+
+        """
         if out is None:
             temp = self.L_norm.adjoint(x)
             return self.L_struct.adjoint(temp)
         else:
             self.L_norm.adjoint(x, out=out)
             return self.L_struct.adjoint(out, out=out)
-    
+
     def inverse(self, x, out=None):
         r"""Returns the inverse :math:`\tilde{L}^{-1}(x)=L_{\text{struct}}^{-1}(L_{\text{norm}}^{-1}(x))`
 
@@ -217,9 +231,8 @@ class GLSQROperator(LinearOperator):
         else:
             self.L_norm.inverse(x, out=out)
             return self.L_struct.inverse(out, out=out)
-        
-    def update_weights(self, x: DataContainer, 
-                       in_transform_domain: bool = False):
+
+    def update_weights(self, x: DataContainer, domain: str = "image"):
         """
         Update DiagonalOperator weights for IRLS L1 regularisation.
 
@@ -232,102 +245,93 @@ class GLSQROperator(LinearOperator):
         ----------
         x : DataContainer
             Current solution estimate.
-        in_transform_domain : bool, optional
-            If True, x is assumed to be in the transformed space (i.e., after applying
-            the structural operator) not the image space. Default is False.
+        domain : {'image', 'struct', 'range'}, optional
+            Defines the mathematical space of ``x`` to ensure weights are calculated
+            from the structural coefficients:
+            - ``'image'`` (default): ``x`` is in domain space; apply :math:`L_{struct}`.
+            - ``'struct'``: ``x`` is in structural/transform space; use directly.
+            - ``'range'``: ``x`` is in weighted range space; apply :math:`L_{norm}^{-1}`.
         adapt_tau : bool, optional
             If True, adapt the tau parameter based on the current solution. Default is False.
         """
         if self.norm_type != "L1":
-            warnings.warn("update_weights called but norm_type is not 'L1'. No update performed.")
+            warnings.warn(
+                "update_weights called but norm_type is not 'L1'. No update performed."
+            )
             return
-        
-        # Map solution to image space if needed
-        if in_transform_domain:
-            self.L_norm.inverse(x, out=self.L_norm.diagonal)
+
+        d = self.L_norm.diagonal
+
+        if domain == "range":
+            # x is weighted coefficients: L_norm(L_struct(image))
+            # Remove weights to get back to structural space
+            self.L_norm.inverse(x, out=d)
+        elif domain == "image":
+            # x is an image: apply L_struct to get structural space
+            self.L_struct.direct(x, out=d)
+        elif domain == "struct":
+            # x is already in structural space: just copy it
+            d = x.copy()
         else:
-            self.L_norm.diagonal.fill(x)
+            raise ValueError("domain must be 'image', 'struct', or 'range'")
 
         # Adapt Tau whilst solution in L_norm space
-        if self.adapt_tau and self._should_adapt_tau():
+        if self.adapt_tau:
             self._adapt_tau()
-        
-        # Update weights w = (x^2 + \tau^2)^{-1/4}
-        np.hypot(self.L_norm.diagonal, self.tau, out=self.L_norm.diagonal)
-        np.sqrt(self.L_norm.diagonal, out=self.L_norm.diagonal)
-        np.reciprocal(self.L_norm.diagonal, out=self.L_norm.diagonal)
-    
+
+        # # Update weights w = (x^2 + \tau^2)^{-1/4}
+        d.power(2, out=d)  # x^2
+        d.add(self.tau**2, out=d)  # x^2 + tau^2
+        d.power(-0.25, out=d)  # (x^2 + tau^2)^-0.25
+
     def _adapt_tau(self):
         """Adapts the smoothing parameter tau based on various strategies.
-        
+
         Strategies:
-        - 'chartrand_2007': Implementation of the strategy from [1]. 
-          Tau is reduced by a factor of 10 once the objective ceases to 
-          decrease significantly.
-        - 'chartrand_2008': Implementation of the strategy from [2]. 
-          Tau is reduced by a factor of 10 once the relative change in the 
-          solution is less than sqrt(tau)/100.
+        - 'factor': Implementation of the strategy from [1] and [2].
+          Tau is reduced by a factor of 10 once the objective/solution
+          ceases to change significantly.
         - NOT implemented 'Daubechies': Adapts tau using the Daubechies et al. (2010) non-increasing sequence.
           Requires self.k_sparsity to be set.
-        
+
         References
         ----------
-        .. [1] R. Chartrand, "Exact Reconstruction of Sparse Signals via Nonconvex 
-           Minimization," IEEE Signal Processing Letters, vol. 14, no. 10, 
+        .. [1] R. Chartrand, "Exact Reconstruction of Sparse Signals via Nonconvex
+           Minimization," IEEE Signal Processing Letters, vol. 14, no. 10,
            pp. 707-710, Oct. 2007. doi: 10.1109/LSP.2007.898300.
-           
-        .. [2] R. Chartrand and Wotao Yin, "Iteratively reweighted algorithms for 
-           compressive sensing," 2008 IEEE International Conference on Acoustics, 
+
+        .. [2] R. Chartrand and Wotao Yin, "Iteratively reweighted algorithms for
+           compressive sensing," 2008 IEEE International Conference on Acoustics,
            Speech and Signal Processing, Las Vegas, NV, USA, 2008, pp. 3869-3872.
            doi: 10.1109/ICASSP.2008.4518498.
 
-        .. [3] Daubechies, I., et al. "Iteratively reweighted least squares 
+        .. [3] Daubechies, I., et al. "Iteratively reweighted least squares
            minimization for sparse recovery," CPAM, 2010.
         """
         if self.norm_type.upper() != "L1":
-            log.warning("adapt_tau called but reg_norm_type is not 'L1'. No adaptation performed.")
+            log.warning(
+                "adapt_tau called but reg_norm_type is not 'L1'. No adaptation performed."
+            )
             return
 
-        if self.tau_mode == 'chartrand_2007':
-            # Strategy for nonconvex minimization:
-            # Initialize tau at 10.0
-            # Reduce by factor of 10 when norm stable (tau_factor=0.1) 
-            self.tau = max(self.tau * self.tau_factor, self.tau_min)
-            log.debug("Tau adapted (Chartrand 2007) to: %e", self.tau)
-
-        elif self.tau_mode == 'chartrand_2008':
+        if self.tau_mode == "factor":
             # IRLS Strategy:
-            # Initialize tau at 1.0 
-            # Reduce by factor of 10 (tau_factor=0.1) once inner loop stabilizes 
+            # Initialize tau at 1.0
+            # Reduce by factor of 10 (tau_factor=0.1) once inner loop stabilizes
             self.tau = max(self.tau * self.tau_factor, self.tau_min)
-            log.debug("Tau adapted (Chartrand 2008) to: %e", self.tau)
+            log.debug("Tau adapted to: %e", self.tau)
         else:
-            log.warning("Unknown tau_mode '%s'. No adaptation performed.", self.tau_mode)
+            log.warning(
+                "Unknown tau_mode '%s'. No adaptation performed.", self.tau_mode
+            )
 
-    def _should_adapt_tau(self):
-        """ Checks if the convergence criteria for the current tau_mode have been met.
-        
-        Returns
-        -------
-        bool
-            True if tau should be adapted, False otherwise.
-        """
-        if self.tau_mode == 'chartrand_2007':
-            # Trigger: objective ceases to decrease significantly 
-            if current_objective is not None and previous_objective is not None:
-                # Tolerance can be linked to atol or a specific stability factor
-                relative_obj_change = abs(previous_objective - current_objective) / previous_objective
-                return relative_obj_change < self.atol 
-            return False
+    # Make tau a property
+    @property
+    def tau(self):
+        return self._tau
 
-        elif self.tau_mode == 'chartrand_2008':
-            # Trigger: relative change in solution < sqrt(tau)/100 
-            # Requires tracking x_change.norm() and x.norm() from the inner loop
-            if x.norm() == 0:
-                return False
-            
-            relative_solution_change = dx.norm() / x.norm()
-            threshold = np.sqrt(self.tau) / 100
-            return relative_solution_change < threshold
-        else:
-            raise ValueError(f"Unknown tau_mode '{self.tau_mode}' for adaptation check.")
+    @tau.setter
+    def tau(self, value):
+        if value <= 0:
+            raise ValueError("tau must be positive.")
+        self._tau = value

@@ -85,7 +85,7 @@ class GLSQR(Algorithm):
 
     - **L1-norm:** :math:`L_{\text{norm}}` is diagonal iteratively reweighted operator to approximate
         the L1 norm. The weights are updated at each outer iteration based on the current solution
-        estimate. 
+        estimate.
 
     The Structural Operator :math:`L_{\text{struct}}`
     ------------------------------------------------
@@ -95,9 +95,9 @@ class GLSQR(Algorithm):
 
     - **Finite Differences:** :math:`L_{\text{struct}}` represents finite difference operators
         for gradient-based regularisation (e.g., Total Variation).
-    
+
     - **General:** :math:`L_{\text{struct}}` can be any linear operator that captures
-        the desired structural properties of the solution. 
+        the desired structural properties of the solution.
 
     The Structural Operator must have an `inverse` method implemented.
 
@@ -166,7 +166,7 @@ class GLSQR(Algorithm):
             Type of regularisation norm ('L1' or 'L2'). Default is 'L2'.
         weight_operator : Operator, optional
             Tikhonov weight operator :math:`L`. The operator must have an inverse or pseudo-inverse
-            method implemented. 
+            method implemented.
         maxoutit : int, optional
             Maximum number of outer iterations. Default is the size of the domain.
         maxinit : int, optional
@@ -233,13 +233,14 @@ class GLSQR(Algorithm):
         range_geom = self.operator.range_geometry()
 
         # 3. Define the regularisation operator (\tilde{L} = L_{\text{norm}} L_{\text{struct}})
-        self.weight_operator = GLSQROperator(domain_geometry=domain_geom,
-                                             range_geometry=range_geom,
-                                             struct_operator=struct_operator,
-                                             norm_type=self.reg_norm_type,
-                                             adapt_tau=True)
+        self.weight_operator = GLSQROperator(
+            domain_geometry=domain_geom,
+            struct_operator=struct_operator,
+            norm_type=self.reg_norm_type,
+            adapt_tau=True,
+        )
         if self.reg_norm_type.upper() == "L1":
-            self.weight_operator.update_weights(self.initial)
+            self.weight_operator.update_weights(self.initial, domain="image")
 
         # 4. Allocate variables for iterations
         self.x = domain_geom.allocate(0)  # 2 domain
@@ -271,8 +272,8 @@ class GLSQR(Algorithm):
 
     def _run_irls_inner_loop(self):
         """Encapsulated inner loop for IRLS-style regularisation."""
-        # # Reset GKB for the new weights
-        # self._initialize_GKB()  # Maps initial to weighted space
+        # Reset GKB for the new weights
+        self._initialize_GKB()  # Maps initial to weighted space
 
         # Inner Loop
         for inner_it in range(self.maxinit):
@@ -282,7 +283,34 @@ class GLSQR(Algorithm):
                 break
 
         # Update weights for next outer iteration
-        self.weight_operator.update_weights(self.x, in_transform_domain=True)
+        self.weight_operator.update_weights(self.x, domain="range")
+
+    def _bidiag_update(self, input_vec, target_vec, op_func, shift_vec, scalar, buffer):
+        """
+        Performs the GKB update step:
+        target = Op(input_vec) - scalar * shift_vec
+        """
+        # op_func (K or adjoint K*) writes its result into the provided buffer
+        op_func(input_vec, out=buffer)
+
+        # Combine (1.0 * buffer) + (-scalar * shift_vec) -> target_vec
+        buffer.sapyb(1.0, shift_vec, -scalar, out=target_vec)
+
+        norm = target_vec.norm()
+        if norm > 0:
+            target_vec.divide(norm, out=target_vec)
+        return norm
+
+    def _apply_K(self, x, out):
+        """Apply effective operator K = A * L_inv"""
+        # buffer must be in domain_geometry
+        self.weight_operator.inverse(x, out=self.tmp_domain)
+        return self.operator.direct(self.tmp_domain, out=out)
+
+    def _apply_K_adjoint(self, u, out):
+        """Apply effective adjoint K* = L_inv * A_adj"""
+        self.operator.adjoint(u, out=self.tmp_domain)
+        return self.weight_operator.inverse(self.tmp_domain, out=out)
 
     def _initialize_GKB(self):
         """
@@ -290,83 +318,64 @@ class GLSQR(Algorithm):
 
         Initialise the GKB process for GLSQR with weighting.
         """
-        # 1. Transform initial guess to weighted space: x = L(initial)
+        # 1. Map initial guess to weighted space
         self.weight_operator.direct(self.initial, out=self.x)
 
-        # 2. Compute initial residual in range space: u = A(L_inv(x)) - data
-        # We use tmp_domain to hold the intermediate L_inv(x)
-        self.weight_operator.inverse(self.x, out=self.tmp_domain)
-        self.operator.direct(self.tmp_domain, out=self.u)
-        self.u.sapyb(1.0, self.data, -1.0, out=self.u)  # u = Ax - b
+        # 2. u = (b - Kx) / beta, beta is norm of numerator
+        # _apply_K outputs to Range, so use self.tmp_range
+        self.beta = self._bidiag_update(
+            self.x, self.u, self._apply_K, self.data, -1.0, self.tmp_range
+        )
 
-        self.beta = self.u.norm()
-        self.u.divide(self.beta, out=self.u)  # Problem if u is zero
+        # 3. v = (K*u - 0) / alpha, alpha is norm of numerator
+        # _apply_K_adjoint outputs to Domain, so use self.tmp_domain
+        self.alpha = self._bidiag_update(
+            self.u, self.v, self._apply_K_adjoint, self.v, 0.0, self.tmp_domain
+        )
 
-        # 3. Compute first vector in domain space: v = L_inv(A_adj(u))
-        self.operator.adjoint(self.u, out=self.tmp_range)
-        self.weight_operator.inverse(self.tmp_range, out=self.v)
-
-        self.alpha = self.v.norm()
-        self.v.divide(self.alpha, out=self.v)
-
-        # 4. Initialize scalars, search direction and residuals
-        self.rhobar = self.alpha
-        self.phibar = self.beta
+        # 4. Initialize scalars and search direction
+        self.rhobar, self.phibar = self.alpha, self.beta
         self.normr = self.beta
         self.beta0 = self.beta
         self.res2 = 0.0
-
-        # Copy v into d (initial search direction) without re-allocating
-        self.v.copy(out=self.d)
+        self.d = self.v.copy()
 
     def _GKB_step(self):
         """single iteration of GKB"""
-        # Update u in GKB
-        self.weight_operator.inverse(self.v, out=self.tmp_domain)
-        self.operator.direct(self.tmp_domain, out=self.tmp_range)
-        self.tmp_range.sapyb(1.0, self.u, -self.alpha, out=self.u)
-        self.beta = self.u.norm()
-        self.u.divide(self.beta, out=self.u)
+        # Update u: u = (Kv - alpha*u) / beta, beta is norm of numerator
+        # _apply_K outputs to Range, so use self.tmp_range
+        self.beta = self._bidiag_update(
+            self.v, self.u, self._apply_K, self.u, self.alpha, self.tmp_range
+        )
 
-        # Update v in GKB
-        self.operator.adjoint(self.u, out=self.tmp_range)
-        self.weight_operator.inverse(self.tmp_range, out=self.tmp_domain)
-        self.v.sapyb(-self.beta, self.tmp_domain, 1.0, out=self.v)
-        self.alpha = self.v.norm()
-        self.v.divide(self.alpha, out=self.v)
+        # Update v: v = (K*u - beta*v) / alpha, alpha is norm of numerator
+        # _apply_K_adjoint outputs to Domain, so use self.tmp_domain
+        self.alpha = self._bidiag_update(
+            self.u, self.v, self._apply_K_adjoint, self.v, self.beta, self.tmp_domain
+        )
 
-        # Eliminate diagonal from regularisation
-        if self.regalpha == 0.0:  # No regularisation
-            rhobar1 = self.rhobar
-            psi = 0
-        else:
-            rhobar1 = np.sqrt(self.rhobar * self.rhobar + self.regalpha**2)
-            c1 = self.rhobar / rhobar1
-            s1 = self.regalpha / rhobar1
-            psi = s1 * self.phibar
-            self.phibar = c1 * self.phibar
+        # 3. Scalar Updates
+        rhobar1 = np.hypot(self.rhobar, self.regalpha)
+        psi = (self.regalpha / rhobar1) * self.phibar
+        phibar_temp = (self.rhobar / rhobar1) * self.phibar
 
-        # Eliminate lower bidiagonal part
-        rho = np.sqrt(rhobar1**2 + self.beta**2)
-        c = rhobar1 / rho
-        s = self.beta / rho
-        theta = s * self.alpha
+        rho = np.hypot(rhobar1, self.beta)
+        c, s = rhobar1 / rho, self.beta / rho
+
+        # Store coefficients for stopping criteria and updates
+        self.step_coeff = (c * phibar_temp) / rho
+        self.d_update_coeff = (s * self.alpha) / rho
+
+        # Update class state for next iteration
         self.rhobar = -c * self.alpha
-        phi = c * self.phibar
-        self.phibar = s * self.phibar
-        self.d_update_coeff = theta / rho
-        self.step_coeff = phi / rho
-
-        # Estimate residual norm
+        self.phibar = s * phibar_temp
         self.res2 += psi**2
-        self.normr = np.sqrt(self.phibar**2 + self.res2)
+        self.normr = np.hypot(self.phibar, np.sqrt(self.res2))
 
-        # 1. Update Solution: x = x + step_coeff * d
-        # (1 * x) + (step_coeff * d)
+        # 4. Vector Updates (Using stored coefficients)
+        # x = x + step_coeff * d
         self.x.sapyb(1.0, self.d, self.step_coeff, out=self.x)
-
-        # 2. Update Search Direction: d = v - d_update_coeff * d
-        # (1 * v) + (-d_update_coeff * d)
+        # d = v - d_update_coeff * d
         self.v.sapyb(1.0, self.d, -self.d_update_coeff, out=self.d)
 
     def update_objective(self):
@@ -379,15 +388,15 @@ class GLSQR(Algorithm):
 
     def _check_inner_stop(self, inner_it):
         """Check inner stopping criteria for IRLS"""
-
         # Current image norm
         xnorm = self.x.norm()
 
-        # Use appropriate tolerances: rel residual uses atol, projected gradient uses btol
+        # Tolerances scaled by initial residual beta0
         rel_res_tol = self.atol * self.beta0
         proj_grad_tol = self.btol * self.beta0
         step_tol = self.xtol * (xnorm + 1.0)
 
+        # Calculate step norm: ||step_coeff * d||
         step_norm = abs(self.step_coeff) * self.d.norm()
 
         log.debug(
@@ -397,17 +406,15 @@ class GLSQR(Algorithm):
             (abs(self.phibar) - proj_grad_tol),
             (step_norm - step_tol),
         )
-        # 1) Relative residual small: Compare current residual with initial
+
         if self.normr <= rel_res_tol:
             log.debug("Stopping Criteria: relative residual.")
             return True
 
-        # 2) Projected gradient small (phibar tracks it)
         if abs(self.phibar) <= proj_grad_tol:
             log.debug("Stopping Criteria: projected gradient.")
             return True
 
-        # 3) Relative step in x small
         if step_norm <= step_tol:
             log.debug("Stopping Criteria: small relative step.")
             return True
