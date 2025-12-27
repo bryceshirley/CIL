@@ -78,9 +78,10 @@ class HybridGLSQR(GLSQR):
         maxoutit: int = 50,
         maxinit: int = 20,
         tau: float = 1e-3,
-        atol: float = 1e-1,
-        btol: float = 1e-1,
-        xtol: float = 1e-1,
+        atol: float = 1e-3,
+        btol: float = 1e-3,
+        xtol: float = 1e-3,
+        reinitialize_GKB: bool = True,
         hybrid_reg_rule=None,
         **kwargs,
     ):
@@ -129,6 +130,7 @@ class HybridGLSQR(GLSQR):
                          btol=btol,
                          xtol=xtol,
                          maxoutit=maxoutit,
+                         reinitialize_GKB = reinitialize_GKB,
                          **kwargs)
         
         
@@ -138,13 +140,10 @@ class HybridGLSQR(GLSQR):
     
     def setup_hybridLSQR(self,hybrid_reg_rule=None):
         """Set up the regularisation parameter selection rule."""
-        # Initial alpha and beta from first iteration
-        self.alphavec = np.zeros(self.maxoutit)
-        self.betavec = np.zeros(self.maxoutit + 1)
 
         # Initialise storage for alpha and beta history
-        self.alphavec[0]  = self.alpha
-        self.betavec[0] = self.beta
+        self.alphavec = [self.alpha]
+        self.betavec = [self.beta]
 
         self.k = 1  # Iteration counter for hybrid LSQR
 
@@ -176,8 +175,8 @@ class HybridGLSQR(GLSQR):
     
     def _append_scalar_history(self):
         """Store history of alpha and beta."""
-        self.alphavec[self.k] = self.alpha
-        self.betavec[self.k] = self.beta
+        self.alphavec.append(self.alpha)
+        self.betavec.append(self.beta)
         self.k += 1
 
     def update(self):

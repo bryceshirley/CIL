@@ -478,12 +478,12 @@ class UpdateRegDiscrep(UpdateRegBase):
         # If f_lo > 0, it means even with zero smoothing (alpha=0),
         # the residual is ALREADY larger than the noise level.
         if f_lo > 0:
-            return self.regalpha_low  # Return 0.0
+            return None
 
         # If f_hi < 0, it means even with max smoothing,
         # the residual is smaller than the noise level.
         if f_hi < 0:
-            return self.regalpha_high
+            return None
 
         result = scipy.optimize.root_scalar(
             self.func, bracket=[self.regalpha_low, self.regalpha_high], method="brentq"

@@ -545,14 +545,12 @@ class TestUpdateRegDiscrep(unittest.TestCase, RegRuleInfrastructureTestsMixin):
         # physically go below the noise floor, phi(alpha) will always be positive.
         rule.noise_level_estimate = floor_norm * 0.5
 
-        # In many implementations, if no root is found, the solver returns
-        # the boundary value (e.g., alpha_min) or None.
+        # It should return None if there are no valid roots.
         # Adjust this based on your specific solver's failure behavior.
         failed_alpha = rule._compute_next_regalpha()
 
-        # Assertion: The function at this alpha should NOT be zero
-        # (it should still be positive because the residual > estimate).
-        self.assertGreater(rule.func(failed_alpha), 0.0)
+        # 1. Assert that it is None
+        self.assertIsNone(failed_alpha, "GCV was expected to return None for this case.")
 
 
 class TestUpdateRegLcurve(unittest.TestCase, RegRuleInfrastructureTestsMixin):
