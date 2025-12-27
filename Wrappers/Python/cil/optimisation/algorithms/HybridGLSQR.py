@@ -119,64 +119,45 @@ class hybridGLSQR(GLSQR):
             Instance of a hybrid regularisation parameter selection rule. If None, defaults to UpdateRegGCV.
         """
         # Initialise parent GLSQR class
-        super().__init__(
-            operator=operator,
-            data=data,
-            initial=initial,
-            reg_norm_type=reg_norm_type,
-            weight_operator=weight_operator,
-            regalpha=regalpha,
-            maxoutit=maxoutit,
-            maxinit=maxinit,
-            tau=tau,
-            atol=atol,
-            btol=btol,
-            xtol=xtol,
-            **kwargs,
-        )
+        super().__init__(operator=operator, data=data, initial=initial, **kwargs)
 
         # 1. Pre-allocate vectors to store alpha and beta values
-        self.alphavec = np.zeros(self.maxoutit + 1)
+        self.alphavec = np.zeros(self.maxoutit)
         self.betavec = np.zeros(self.maxoutit + 1)
 
-        # 2. Initialise first entries
-        self.alphavec[0] = self.alpha
+        # 2. Initialise first beta value from GKB Initialisation
         self.betavec[0] = self.beta
 
         # Select rule instance
         if hybrid_reg_rule is not None:
             self.reg_rule = hybrid_reg_rule
         else:
-            m = data.size
-            n = operator.domain_geometry().size
             self.reg_rule = UpdateRegGCV(
                 tol=1e-3,
-                data_size=m,
-                domain_size=n,
+                data_size=data.size,
+                domain_size=operator.domain_geometry().size,
                 gcv_weight=1.0,
                 adaptive_weight=True,
             )
 
     def _build_projected_operator(self):
         """
-        Builds the (k+1) x k bidiagonal projected operator.
+        Builds the (k+1) x k bidiagonal projected operator Bk.
         """
         k = self.iteration
 
-        # Update latest alpha and beta in our pre-allocated vectors
-        self.alphavec[k] = self.alpha
-        self.betavec[k + 1] = self.beta
+        # 1. Update the scalar history
+        self.alphavec[k - 1] = self.alpha
+        self.betavec[k] = self.beta
 
-        # Allocate Bk
-        Bk = np.zeros((k + 1, k))
+        # 2. Build the matrix using diagonal offsets
+        Bk = np.diag(self.alphavec[:k]) + np.diag(self.betavec[1:k], k=-1)
 
-        # Fill main diagonal (alpha values)
-        np.fill_diagonal(Bk, self.alphavec[:k])
+        # 3. Add the final 'beta' row at the bottom to make it (k+1) x k
+        last_row = np.zeros((1, k))
+        last_row[0, -1] = self.betavec[k]
 
-        # Fill sub-diagonal (beta values)
-        np.fill_diagonal(Bk[1:, :], self.betavec[1 : k + 1])
-
-        return Bk
+        return np.vstack([Bk, last_row])
 
     def update(self):
         """single iteration"""
@@ -193,6 +174,9 @@ class hybridGLSQR(GLSQR):
         self.regalpha = self.reg_rule.regalpha
 
     def update_objective(self):
+        """Monitor convergence and loss."""
+        super().update_objective()
+
         if self.reg_rule.converged:
             self.iteration = self.reg_rule.iteration
             log.info(
