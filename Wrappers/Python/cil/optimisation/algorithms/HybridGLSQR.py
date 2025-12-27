@@ -25,7 +25,7 @@ import logging
 log = logging.getLogger(__name__)
 
 
-class hybridGLSQR(GLSQR):
+class HybridGLSQR(GLSQR):
     r"""Hybrid Generalized Least Squares QR (GLSQR) algorithm
 
     Solves the regularised least-squares problem with hybrid regularisation.
@@ -73,7 +73,7 @@ class hybridGLSQR(GLSQR):
         data: DataContainer,
         initial: DataContainer = None,
         reg_norm_type: str = "L2",
-        weight_operator=None,
+        struct_operator=None,
         regalpha: float = 0.0,
         maxoutit: int = 50,
         maxinit: int = 20,
@@ -119,14 +119,34 @@ class hybridGLSQR(GLSQR):
             Instance of a hybrid regularisation parameter selection rule. If None, defaults to UpdateRegGCV.
         """
         # Initialise parent GLSQR class
-        super().__init__(operator=operator, data=data, initial=initial, **kwargs)
-
-        # 1. Pre-allocate vectors to store alpha and beta values
+        super().__init__(operator=operator, data=data, initial=initial,
+                         reg_norm_type=reg_norm_type,
+                         struct_operator=struct_operator,
+                         regalpha=regalpha,
+                         maxinit=maxinit,
+                         tau=tau,
+                         atol=atol,
+                         btol=btol,
+                         xtol=xtol,
+                         maxoutit=maxoutit,
+                         **kwargs)
+        
+        
+        # Set up hybrid regularisation parameter selection rule
+        self.setup_hybridLSQR(hybrid_reg_rule=hybrid_reg_rule)
+       
+    
+    def setup_hybridLSQR(self,hybrid_reg_rule=None):
+        """Set up the regularisation parameter selection rule."""
+        # Initial alpha and beta from first iteration
         self.alphavec = np.zeros(self.maxoutit)
         self.betavec = np.zeros(self.maxoutit + 1)
 
-        # 2. Initialise first beta value from GKB Initialisation
+        # Initialise storage for alpha and beta history
+        self.alphavec[0]  = self.alpha
         self.betavec[0] = self.beta
+
+        self.k = 1  # Iteration counter for hybrid LSQR
 
         # Select rule instance
         if hybrid_reg_rule is not None:
@@ -134,8 +154,8 @@ class hybridGLSQR(GLSQR):
         else:
             self.reg_rule = UpdateRegGCV(
                 tol=1e-3,
-                data_size=data.size,
-                domain_size=operator.domain_geometry().size,
+                data_size=self.data.size,
+                domain_size=self.initial.size,
                 gcv_weight=1.0,
                 adaptive_weight=True,
             )
@@ -144,20 +164,21 @@ class hybridGLSQR(GLSQR):
         """
         Builds the (k+1) x k bidiagonal projected operator Bk.
         """
-        k = self.iteration
+        # 2. Pre-allocate Bk for this specific subspace size
+        Bk = np.zeros((self.k + 1, self.k))
 
-        # 1. Update the scalar history
-        self.alphavec[k - 1] = self.alpha
-        self.betavec[k] = self.beta
+        # 3. Fill main diagonal: alpha_1 to alpha_k
+        np.fill_diagonal(Bk, self.alphavec[:self.k])
 
-        # 2. Build the matrix using diagonal offsets
-        Bk = np.diag(self.alphavec[:k]) + np.diag(self.betavec[1:k], k=-1)
-
-        # 3. Add the final 'beta' row at the bottom to make it (k+1) x k
-        last_row = np.zeros((1, k))
-        last_row[0, -1] = self.betavec[k]
-
-        return np.vstack([Bk, last_row])
+        # 4. Fill sub-diagonal: beta_2 to beta_k+1
+        np.fill_diagonal(Bk[1:, :], self.betavec[1:self.k+1])
+        return Bk
+    
+    def _append_scalar_history(self):
+        """Store history of alpha and beta."""
+        self.alphavec[self.k] = self.alpha
+        self.betavec[self.k] = self.beta
+        self.k += 1
 
     def update(self):
         """single iteration"""
@@ -165,6 +186,7 @@ class hybridGLSQR(GLSQR):
         self._perform_iteration()
 
         # Build Bk
+        self._append_scalar_history()
         Bk = self._build_projected_operator()
 
         # Select regularisation parameter
