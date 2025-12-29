@@ -36,8 +36,11 @@ from cil.optimisation.utilities.HybridUpdateReg import (
     UpdateRegDiscrep,
     UpdateRegLcurve,
     UpdateRegGCV,
+    UpdateRegReginska,
+    UpdateRegUPRE,
 )
 
+from testclass import CCPiTestClass
 
 class RegRuleInfrastructureTestsMixin:
     """
@@ -218,6 +221,77 @@ class RegRuleInfrastructureTestsMixin:
         self.assertAlmostEqual(
             rule._projected_solution_norm_sq(alpha), expected_sol, places=12
         )
+    
+    def test_derivative_consistency(self):
+        """Compare analytical derivatives against finite difference results."""
+        rule = self.setup_noisy_system()
+        alpha = 0.5
+        h = 1e-3 # Finite difference step size
+
+        # Analytical results
+        R2_p_a, X2_p_a = rule._projected_norm_first_derivatives(alpha)
+        R2_pp_a, X2_pp_a = rule._projected_norm_second_derivatives(alpha)
+        R2_ppp_a, X2_ppp_a = rule._projected_norm_third_derivatives(alpha)
+
+        # Finite Difference for First Derivatives
+        # (f(a+h) - f(a-h)) / 2h
+        R2_p_fd = (
+            rule._projected_residual_norm_sq(alpha + h)
+            - rule._projected_residual_norm_sq(alpha - h)
+        ) / (2 * h)
+        X2_p_fd = (
+            rule._projected_solution_norm_sq(alpha + h)
+            - rule._projected_solution_norm_sq(alpha - h)
+        ) / (2 * h)
+
+        # Finite Difference for Second Derivatives
+        # (f(a+h) - 2f(a) + f(a-h)) / h^2
+        R2_pp_fd = (
+            rule._projected_residual_norm_sq(alpha + h)
+            - 2 * rule._projected_residual_norm_sq(alpha)
+            + rule._projected_residual_norm_sq(alpha - h)
+        ) / (h**2)
+        X2_pp_fd = (
+            rule._projected_solution_norm_sq(alpha + h)
+            - 2 * rule._projected_solution_norm_sq(alpha)
+            + rule._projected_solution_norm_sq(alpha - h)
+        ) / (h**2)
+
+
+        # Finite Difference for Third Derivatives
+        # (f(a+2h) - 2f(a+h) + 2f(a-h) - f(a-2h)) / (2h^3)
+        R2_ppp_fd = (
+            rule._projected_residual_norm_sq(alpha + 2*h) 
+            - 2*rule._projected_residual_norm_sq(alpha + h) 
+            + 2*rule._projected_residual_norm_sq(alpha - h) 
+            - rule._projected_residual_norm_sq(alpha - 2*h)
+        ) / (2 * h**3)
+        X2_ppp_fd = (
+            rule._projected_solution_norm_sq(alpha + 2*h) 
+            - 2*rule._projected_solution_norm_sq(alpha + h) 
+            + 2*rule._projected_solution_norm_sq(alpha - h) 
+            - rule._projected_solution_norm_sq(alpha - 2*h)
+        ) / (2 * h**3)
+
+        # Comparisons (Relative tolerances because second derivatives are sensitive)
+        np.testing.assert_allclose(
+            R2_p_a, R2_p_fd, rtol=1e-5, err_msg="R2 first derivative mismatch"
+        )
+        np.testing.assert_allclose(
+            X2_p_a, X2_p_fd, rtol=1e-5, err_msg="X2 first derivative mismatch"
+        )
+        np.testing.assert_allclose(
+            R2_pp_a, R2_pp_fd, rtol=1e-4, err_msg="R2 second derivative mismatch"
+        )
+        np.testing.assert_allclose(
+            X2_pp_a, X2_pp_fd, rtol=1e-4, err_msg="X2 second derivative mismatch"
+        )
+        np.testing.assert_allclose(
+            R2_ppp_a, R2_ppp_fd, rtol=1e-4, err_msg="R2 third derivative mismatch"
+        )
+        np.testing.assert_allclose(
+            X2_ppp_a, X2_ppp_fd, rtol=1e-4, err_msg="X2 third derivative mismatch"
+        )
 
     def test_norm_asymptotic_limits(self):
         """Verify norms at extreme alpha values."""
@@ -338,7 +412,7 @@ class RegRuleInfrastructureTestsMixin:
             rule._geometric_grid(regalpha_limits=(1.0, 1.0))
 
 
-class TestUpdateRegBase(unittest.TestCase, RegRuleInfrastructureTestsMixin):
+class TestUpdateRegBase(CCPiTestClass, RegRuleInfrastructureTestsMixin):
     """
     Unit tests for the Base Class of Hybrid LSQR Regularization Parameter Selection Rules.
     """
@@ -440,7 +514,7 @@ class TestUpdateRegBase(unittest.TestCase, RegRuleInfrastructureTestsMixin):
         )
 
 
-class TestUpdateRegDiscrep(unittest.TestCase, RegRuleInfrastructureTestsMixin):
+class TestUpdateRegDiscrep(CCPiTestClass, RegRuleInfrastructureTestsMixin):
     def setUp(self):
         """Set up synthetic bidiagonal system for testing."""
         self.setup_defaults(RuleClass=UpdateRegDiscrep)
@@ -553,7 +627,7 @@ class TestUpdateRegDiscrep(unittest.TestCase, RegRuleInfrastructureTestsMixin):
         self.assertIsNone(failed_alpha, "GCV was expected to return None for this case.")
 
 
-class TestUpdateRegLcurve(unittest.TestCase, RegRuleInfrastructureTestsMixin):
+class TestUpdateRegLcurve(CCPiTestClass, RegRuleInfrastructureTestsMixin):
     """
     Unit tests for the L-Curve Regularization Parameter Selection Rule.
 
@@ -577,78 +651,29 @@ class TestUpdateRegLcurve(unittest.TestCase, RegRuleInfrastructureTestsMixin):
         Construct a projected problem with a clear L-curve and verify
         that the selected alpha corresponds to the peak curvature.
         """
-        rule = self.setup_noisy_system(noise_level=0.001)
+        rule = self.setup_noisy_system(noise_level=0.01)
 
         # Compute next regularization parameter  and curvature
-        new_alpha = rule._compute_next_regalpha()
-        rule.regalpha = new_alpha
-        new_curv = rule.func(new_alpha)
+        alpha_opt = rule._compute_next_regalpha()
+        rule.regalpha = alpha_opt
+        func_opt = rule.func(alpha_opt)
 
-        # Verification using a dense grid search
-        regalpha_grid, curvatures, _ = rule._geometric_grid(num_points=400)
-        grid_max_idx = np.argmax(curvatures)
-        grid_alpha = regalpha_grid[grid_max_idx]
-        grid_max_curv = curvatures[grid_max_idx]
+        # Grid search for a robust starting point
+        alpha_grid_search, func_grid_search, _, _ = rule.grid_search(
+            num_points=1000
+        )
 
-        # # Plot for debugging
+        # Plot for debugging
         # rule.plot_function(filepath="l_curve.png")  # L-curve & curvature
 
         # Assertions: selected alpha should match grid peak
         self.assertAlmostEqual(
-            np.log10(new_alpha),
-            np.log10(grid_alpha),
+            np.log10(alpha_opt),
+            np.log10(alpha_grid_search),
             places=1,
-            msg=f"Optimized alpha ({new_alpha:.2e}) differs from grid ({grid_alpha:.2e})",
+            msg=f"Optimized alpha ({alpha_opt:.2e}) differs from grid ({alpha_grid_search:.2e})",
         )
-        self.assertAlmostEqual(new_curv, grid_max_curv, places=2)
-
-    def test_derivative_consistency(self):
-        """Compare analytical derivatives against finite difference results."""
-        rule = self.setup_noisy_system()
-        alpha = 0.5
-        h = 1e-5  # Step size for finite difference
-
-        # Analytical results
-        R2_p_a, R2_pp_a, X2_p_a, X2_pp_a = rule._projected_norm_derivatives(alpha)
-
-        # Finite Difference for First Derivatives
-        # (f(a+h) - f(a-h)) / 2h
-        R2_p_fd = (
-            rule._projected_residual_norm_sq(alpha + h)
-            - rule._projected_residual_norm_sq(alpha - h)
-        ) / (2 * h)
-        X2_p_fd = (
-            rule._projected_solution_norm_sq(alpha + h)
-            - rule._projected_solution_norm_sq(alpha - h)
-        ) / (2 * h)
-
-        # Finite Difference for Second Derivatives
-        # (f(a+h) - 2f(a) + f(a-h)) / h^2
-        R2_pp_fd = (
-            rule._projected_residual_norm_sq(alpha + h)
-            - 2 * rule._projected_residual_norm_sq(alpha)
-            + rule._projected_residual_norm_sq(alpha - h)
-        ) / (h**2)
-        X2_pp_fd = (
-            rule._projected_solution_norm_sq(alpha + h)
-            - 2 * rule._projected_solution_norm_sq(alpha)
-            + rule._projected_solution_norm_sq(alpha - h)
-        ) / (h**2)
-
-        # Comparisons (Relative tolerances because second derivatives are sensitive)
-        np.testing.assert_allclose(
-            R2_p_a, R2_p_fd, rtol=1e-5, err_msg="R2 first derivative mismatch"
-        )
-        np.testing.assert_allclose(
-            X2_p_a, X2_p_fd, rtol=1e-5, err_msg="X2 first derivative mismatch"
-        )
-        np.testing.assert_allclose(
-            R2_pp_a, R2_pp_fd, rtol=1e-3, err_msg="R2 second derivative mismatch"
-        )
-        np.testing.assert_allclose(
-            X2_pp_a, X2_pp_fd, rtol=1e-3, err_msg="X2 second derivative mismatch"
-        )
-
+        self.assertAlmostEqual(func_opt, func_grid_search, places=2)
     def test_log_space_stability(self):
         """Ensure no NaN/Inf results when norms are extremely small."""
         rule = self.setup_noisy_system()
@@ -708,8 +733,28 @@ class TestUpdateRegLcurve(unittest.TestCase, RegRuleInfrastructureTestsMixin):
             "Selected alpha under noise fell outside singular value bounds.",
         )
 
+    def test_func_derivative_consistency(self):
+        """Compare analytical derivatives against finite difference results."""
+        rule = self.setup_noisy_system()
+        alpha = 0.5
+        h = 1e-5  # Step size for finite difference
 
-class TestUpdateRegGCV(unittest.TestCase, RegRuleInfrastructureTestsMixin):
+        # Analytical results
+        curv_p_a = rule._func_first_derivative(alpha)
+
+        # Finite Difference for First Derivative
+        # (f(a+h) - f(a-h)) / 2h
+        curv_p_fd = - (
+            rule.func(alpha + h) - rule.func(alpha - h)
+        ) / (2 * h)
+
+        # Comparisons
+        np.testing.assert_allclose(
+            curv_p_a, curv_p_fd, rtol=1e-5, err_msg="Curvature first derivative mismatch"
+        )
+
+
+class TestUpdateRegGCV(CCPiTestClass, RegRuleInfrastructureTestsMixin):
     """
     Unit tests for the GCV Regularization Parameter Selection Rule.
     """
@@ -867,4 +912,173 @@ class TestUpdateRegGCV(unittest.TestCase, RegRuleInfrastructureTestsMixin):
             expected_ghat,
             places=7,
             msg="Ghat_func math does not match the paper's formula.",
+        )
+
+class TestUpdateRegReginska(CCPiTestClass, RegRuleInfrastructureTestsMixin):
+    """
+    Unit tests for the Reginska Regularization Parameter Selection Rule.
+    """
+
+    def setUp(self):
+        """Set up synthetic bidiagonal system for testing."""
+        self.setup_defaults(RuleClass=UpdateRegReginska)
+
+    def test_reginska_minimization(self):
+        """Verify that the selected alpha minimizes the Reginska functional."""
+        rule = self.setup_noisy_system(noise_level=0.01)
+        rule.mu = 0.5
+        
+        # 1. Compute alpha using the rule's optimization
+        alpha_opt = rule._compute_next_regalpha()
+        rule.regalpha = alpha_opt
+        func_opt = rule.func(alpha_opt)
+        
+        # 2. Verify against a dense grid search
+        # Grid search for a robust starting point
+        alpha_grid_search, func_grid_search, _, regalpha_grid = rule.grid_search(
+            num_points=1000
+        )
+
+        # rule.plot_function(filepath="reginska_test.png")  # Optional visual check
+
+        self.assertAlmostEqual(
+            func_opt,
+            func_grid_search,
+            places=2,
+            msg=f"Reginska func min {func_opt:.2e} differs from grid {func_grid_search:.2e}"
+        )
+        self.assertAlmostEqual(
+            np.log10(alpha_opt),
+            np.log10(alpha_grid_search),
+            places=2,
+            msg=f"Reginska alpha {alpha_opt:.2e} differs from grid {alpha_grid_search:.2e}"
+        )
+
+    def test_mu_parameter_effect(self):
+        """Higher mu should not reduce the regularization strength."""
+        rule_mu1 = self.setup_noisy_system(noise_level=0.1)
+        rule_mu1.mu = 1.0
+        alpha1 = rule_mu1._compute_next_regalpha()
+
+        rule_mu2 = self.setup_noisy_system(noise_level=0.1)
+        rule_mu2.mu = 2.0
+        alpha2 = rule_mu2._compute_next_regalpha()
+
+        # Allow flat regions but forbid reversal
+        self.assertTrue(
+            alpha2 >= alpha1 or np.isclose(alpha2, alpha1, rtol=1e-2),
+            f"Higher mu should not reduce alpha: {alpha1} → {alpha2}"
+        )
+
+
+    def test_functional_math(self):
+        """Manual verification of the Reginska functional (log form)."""
+        rule = self.setup_small_system_single_iteration()
+        alpha = 0.1
+        rule.mu = 1.0
+
+        r2 = rule._projected_residual_norm_sq(alpha)
+        x2 = rule._projected_solution_norm_sq(alpha)
+
+        expected = 0.5 * (np.log(r2) + rule.mu * np.log(x2))
+
+        self.assertAlmostEqual(
+            rule.func(alpha),
+            expected,
+            places=12
+        )
+    
+    def test_func_first_derivative(self):
+        """Verify first derivative of Reginska functional via finite differences."""
+        rule = self.setup_small_system_single_iteration()
+        alpha = 0.2
+        h = 1e-6
+
+        # Analytical first derivative
+        R2_p_a = rule._func_first_derivative(alpha)
+
+        # Finite difference approximation
+        R2_p_fd = (
+            rule.func(alpha + h) - rule.func(alpha - h)
+        ) / (2 * h)
+
+        np.testing.assert_allclose(
+            R2_p_a, R2_p_fd, rtol=1e-5, err_msg="Reginska first derivative mismatch"
+        )
+
+
+
+class TestUpdateRegUPRE(CCPiTestClass, RegRuleInfrastructureTestsMixin):
+    """
+    Unit tests for the UPRE Regularization Parameter Selection Rule.
+    """
+
+    def setUp(self):
+        """Set up synthetic bidiagonal system for testing."""
+        from cil.optimisation.utilities.HybridUpdateReg import UpdateRegUPRE
+        self.setup_defaults(RuleClass=UpdateRegUPRE)
+
+    def test_upre_trace_calculation(self):
+        """Verify the trace of the influence matrix is calculated correctly."""
+        rule = self.setup_small_system_single_iteration()
+        alpha = 0.5
+        
+        # Manual trace: sum( s_i^2 / (s_i^2 + alpha^2) )
+        expected_trace = np.sum(rule.Sbsq / (rule.Sbsq + alpha**2))
+        
+        # UPRE functional is (1/m)*||r||^2 + (2*sigma^2/m)*trace - sigma^2
+        # We check the func implementation for this trace logic
+        sigma2 = 0.01
+        rule.sigma2 = sigma2
+        r2 = rule._projected_residual_norm_sq(alpha)
+        expected_upre = (1.0/rule.m) * r2 + (2.0 * sigma2 / rule.m) * expected_trace - sigma2
+        
+        self.assertAlmostEqual(rule.func(alpha), expected_upre, places=12)
+
+    def test_noise_variance_sensitivity(self):
+        """Verify that higher noise variance estimate leads to higher alpha."""
+        rule_low = UpdateRegUPRE(self.m, self.n, noise_variance=1e-4)
+        rule_low = self.setup_noisy_system(rule=rule_low)
+        alpha_low = rule_low._compute_next_regalpha()
+
+        rule_high = UpdateRegUPRE(self.m, self.n, noise_variance=1e-1)
+        rule_high = self.setup_noisy_system(rule=rule_high)
+        alpha_high = rule_high._compute_next_regalpha()
+
+        self.assertGreater(
+            alpha_high, alpha_low, 
+            "UPRE should increase regularization as noise variance increases."
+        )
+
+    def test_upre_minimization(self):
+        """Verify that the selected alpha minimizes the UPRE functional."""
+        # 1. Setup rule with known noise level
+        sigma = 0.01
+        rule = UpdateRegUPRE(self.m, self.n, noise_variance=sigma**2)
+        rule = self.setup_noisy_system(rule=rule, noise_level=sigma)
+        
+        # 2. Optimization
+        new_alpha = rule._compute_next_regalpha()
+        val_opt = rule.func(new_alpha)
+
+        # 3. Dense Grid Search (500 points)
+        regalpha_grid, func_grid, _ = rule._geometric_grid(num_points=500)
+        best_grid_idx = np.argmin(func_grid)
+        grid_alpha = regalpha_grid[best_grid_idx]
+        val_grid = func_grid[best_grid_idx]
+
+        # 4. Assertions
+        # A: Check log-distance (loose because grid is discrete)
+        self.assertAlmostEqual(
+            np.log10(new_alpha),
+            np.log10(grid_alpha),
+            places=1,
+            msg=f"UPRE minimum {new_alpha:.2e} differs significantly from grid {grid_alpha:.2e}"
+        )
+        
+        # B: The optimizer should be as good or better than the best grid point
+        self.assertLessEqual(
+            val_opt, 
+            val_grid + 1e-9, 
+            "Optimizer failed to find a value at least as good as the grid search."
         )

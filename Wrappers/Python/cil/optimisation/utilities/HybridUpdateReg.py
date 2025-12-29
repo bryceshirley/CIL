@@ -208,6 +208,175 @@ class UpdateRegBase(ABC):
 
         return residual
 
+    def _projected_norm_first_derivatives(self, reg):
+        r"""Compute analytical squared projected norms and their 1st/2nd derivatives.
+
+        **Variable Naming Convention:**
+
+        In the code, suffixes are used to represent derivatives with respect
+        to the regularization parameter :math:`\alpha`:
+
+        * **_p**: First derivative, :math:`\frac{d}{d\alpha}` (e.g., ``R2_p`` is :math:`(R^2)'`).
+        * **_pp**: Second derivative, :math:`\frac{d^2}{d\alpha^2}` (e.g., ``R2_pp`` is :math:`(R^2)''`).
+
+        Returns
+        -------
+        tuple
+            (R2_p, X2_p) if `second_derivatives` is False, else (R2_p, R2_pp, X2_p, X2_pp)
+        """
+        fr = self._residual_filter(reg)
+        fx = self._solution_filter(reg)
+        fr_p, fx_p = self._filter_first_derivatives(reg)
+
+        # First and Second Derivatives of Squared Projected Norms
+        b_norm_sq = self.b_norm * self.b_norm
+        u1_sq = self.u1 * self.u1
+
+        R2_p = 2 * b_norm_sq * np.sum(u1_sq * fr * fr_p)
+        X2_p = 2 * b_norm_sq * np.sum(u1_sq * fx * fx_p)
+
+        return R2_p, X2_p
+    
+    def _projected_norm_second_derivatives(self, reg):
+        r"""Compute analytical squared projected norms and their 2nd derivatives.
+
+        **Variable Naming Convention:**
+
+        In the code, suffixes are used to represent derivatives with respect
+        to the regularization parameter :math:`\alpha`:
+
+        * **_pp**: Second derivative, :math:`\frac{d^2}{d\alpha^2}` (e.g., ``R2_pp`` is :math:`(R^2)''`).
+
+        Returns
+        -------
+        tuple
+            (R2_pp, X2_pp)
+        """
+        # SVD-based filter factors and their second derivatives
+        fr = self._residual_filter(reg)
+        fx = self._solution_filter(reg)
+        fr_p, fx_p = self._filter_first_derivatives(reg)
+        fr_pp, fx_pp = self._filter_second_derivatives(reg)
+
+        # Second Derivatives of Squared Projected Norms
+        b_norm_sq = self.b_norm * self.b_norm
+        u1_sq = self.u1 * self.u1
+
+        R2_pp = 2 * b_norm_sq * np.sum(u1_sq * (fr_p**2 + fr * fr_pp))
+        X2_pp = 2 * b_norm_sq * np.sum(u1_sq * (fx_p**2 + fx * fx_pp))
+
+        return R2_pp, X2_pp
+    
+    def _projected_norm_third_derivatives(self, reg):
+        r"""
+        Compute analytical third derivatives of squared projected residual
+        and solution norms.
+
+        Returns
+        -------
+        tuple
+            (R2_ppp, X2_ppp)
+        """
+        fr = self._residual_filter(reg)
+        fx = self._solution_filter(reg)
+        fr_p, fx_p = self._filter_first_derivatives(reg)
+        fr_pp, fx_pp = self._filter_second_derivatives(reg)
+        fr_ppp, fx_ppp = self._filter_third_derivatives(reg)
+
+        b_norm_sq = self.b_norm**2
+        u1_sq = self.u1**2
+
+        R2_ppp = 2 * b_norm_sq * np.sum(u1_sq * (3 * fr_p * fr_pp + fr * fr_ppp))
+        X2_ppp = 2 * b_norm_sq * np.sum(u1_sq * (3 * fx_p * fx_pp + fx * fx_ppp))
+
+        return R2_ppp, X2_ppp
+
+    
+    def _filter_first_derivatives(self, reg):
+        r"""
+        Compute first derivatives of Tikhonov filter factors.
+
+        The filters are defined as defined in :meth:`_residual_filter` and
+        :meth:`_solution_filter`.
+
+        The derivatives with respect to :math:`\alpha` are:
+
+        .. math::
+           f_r' = \frac{2\alpha\sigma^2}{(\sigma^2 + \alpha^2)^2}, \quad
+           f_r'' = \frac{2\sigma^2(\sigma^2 - 3\alpha^2)}{(\sigma^2 + \alpha^2)^3}
+
+        .. math::
+           f_x' = \frac{-2\alpha\sigma}{(\sigma^2 + \alpha^2)^2}, \quad
+           f_x'' = \frac{2\sigma(3\alpha^2 - \sigma^2)}{(\sigma^2 + \alpha^2)^3}
+
+        In the code, suffixes are used to represent derivatives with respect
+        to the regularization parameter :math:`\alpha`:
+
+        * **_p**: First derivative, :math:`\frac{d}{d\alpha}` (e.g., ``R2_p`` is :math:`(R^2)'`).
+
+        Parameters
+        ----------
+        reg : float
+            The regularization parameter :math:`\alpha`.
+
+        Returns
+        -------
+        tuple
+            ( fr_p, fx_p)
+        """
+        a2 = reg**2
+        s2 = self.Sbsq
+        denom2 = (s2 + a2)**2
+
+        fr_p = 2 * reg * s2 / denom2
+        fx_p = -2 * reg * self.Sb / denom2
+        return fr_p, fx_p
+    
+    def _filter_second_derivatives(self, reg):
+        r"""
+        Compute second derivatives of Tikhonov filter factors.
+        The filters are defined as defined in :meth:`_residual_filter` and
+        :meth:`_solution_filter`.
+
+        The second derivatives with respect to :math:`\alpha` are:
+        * **_pp**: Second derivative, :math:`\frac{d^2}{d\alpha^2}` (e.g., ``R2_pp`` is :math:`(R^2)''`).
+        
+        Parameters
+        ----------
+        reg : float
+            The regularization parameter :math:`\alpha`.
+        Returns
+        -------
+        tuple
+            (fr_pp, fx_pp)
+        """
+        a2 = reg**2
+        s2 = self.Sbsq
+        denom3 = (s2 + a2)**3
+
+        fr_pp = 2 * s2 * (s2 - 3 * a2) / denom3
+        fx_pp = 2 * self.Sb * (3 * a2 - s2) / denom3
+        return fr_pp, fx_pp
+
+    def _filter_third_derivatives(self, reg):
+        r"""
+        Compute third derivatives of Tikhonov filter factors.
+
+        Returns
+        -------
+        tuple
+            (fr_ppp, fx_ppp)
+        """
+        a2 = reg**2
+        s2 = self.Sbsq
+
+        fr_ppp = 24 * reg * s2 * (a2 - s2) / (s2 + a2)**4
+        fx_ppp = 24 * reg * self.Sb * (s2 - a2) / (s2 + a2)**4
+
+        return fr_ppp, fx_ppp
+    
+
+
     def _run_convergence_checks(self):
         """Standard convergence check based on the saturation of alpha.
 
@@ -579,311 +748,6 @@ class UpdateRegDiscrep(UpdateRegBase):
         plt.show()
         plt.close()
 
-
-class UpdateRegLcurve(UpdateRegBase):
-    r"""L-curve method for choosing the regularisation parameter :math:`\alpha`.
-
-    This rule identifies the "corner" of the L-curve—the point of maximum curvature
-    when plotting the log-norm of the solution versus the log-norm of the residual.
-
-    In the :math:`k`-th Krylov subspace, the performance of the regularised
-    solution :math:`x_\alpha` is evaluated using the following projected norms:
-
-    .. math:: \eta(\alpha) = \log \|x_\alpha\|_2, \quad \rho(\alpha) = \log \|r_\alpha\|_2
-
-    These are the logarithms of the projected solution and residual norms, respectively.
-    See :meth:`_projected_solution_norm_sq` and :meth:`_projected_residual_norm_sq` for details.
-
-    The curvature :math:`\kappa(\alpha)` is computed using exact analytical first
-    (:math:`\rho', \eta'`) and second (:math:`\rho'', \eta''`) derivatives of
-    these log-norms with respect to :math:`\alpha`:
-
-    .. math:: \kappa(\alpha) = \frac{\rho' \eta'' - \eta' \rho''}{((\rho')^2 + (\eta')^2)^{3/2}}
-
-    The algorithm finds :math:`\alpha` that maximizes the curvature :math:`\kappa(\alpha)` using
-    a bounded optimization search within the range of the current projected
-    singular values.
-
-    Parameters
-    ----------
-    tol : float
-        Relative tolerance for convergence of the regularisation parameter.
-    data_size : int
-        Number of elements in the data; corresponds to range of the operator
-        (denoted as 'm').
-    domain_size : int
-        Number of elements in the solution; corresponds to domain of the operator
-        (denoted as 'n').
-    """
-
-    def __init__(self, data_size: int, domain_size: int, tol: float = 1e-2):
-        super().__init__(data_size, domain_size, tol)
-        self.rule_type = "l-curve"
-
-    def _compute_next_regalpha(self):
-        """
-        Find alpha that maximizes curvature using a global nonconvex 1D optimizer.
-        Handles negative or nonconvex functions efficiently for scalar reg.
-        """
-        self.regalpha_high = self.Sbmax
-        self.regalpha_low = max(self.Sbmin, self.EPS)
-        # 1. Setup Search Bounds in log10 space
-        # Using Sbmin/Sbmax ensures we stay within the meaningful spectral range.
-        log_low = np.log10(self.regalpha_low)
-        log_high = np.log10(self.regalpha_high)
-
-        # 2. Global Search: Coarse Grid
-        # Used to distinguish the elbow from boundary artifacts.
-        grid_alphas = np.logspace(log_low, log_high, num=50)
-        grid_curvatures = np.array([self.func(a) for a in grid_alphas])
-
-        # Find the peak from the grid, avoiding the very first/last points
-        # to bypass the boundary plateaus seen in your plots.
-        inner_idx = np.argmax(grid_curvatures[5:-5]) + 5
-        x0_refined = grid_alphas[inner_idx]
-
-        # 3. Local Refinement: Bounded Optimization
-        res = scipy.optimize.minimize(
-            lambda reg: -self.func(reg),
-            x0=x0_refined,
-            bounds=[(10**log_low, 10**log_high)],
-            tol=1e-10,
-        )
-
-        if res.success and np.isfinite(res.x[0]):
-            new_alpha = res.x[0]
-        else:
-            # Fallback to the grid search peak if the optimizer fails to converge
-            new_alpha = x0_refined
-
-        return new_alpha
-
-    def func(self, reg):
-        r"""Compute the L-curve curvature :math:`\kappa(\alpha)` at a specific alpha.
-
-        This method implements the log-log space curvature formula. Although the
-        L-curve is defined in :math:`(\log\|r\|, \log\|x\|)` space, this function
-        computes the required derivatives analytically. This approach is more
-        numerically stable than computing finite-difference derivatives of the
-        log-norms, as the logarithmic functions are eliminated through differentiation,
-        avoiding potential issues with small values.
-
-        Given :math:`\rho = \log \|r\| = \frac{1}{2} \log(R^2)`, the derivatives
-        w.r.t. :math:`\alpha` are:
-
-        .. math::
-           \rho' = \frac{(R^2)'}{2 R^2}, \quad
-           \rho'' = \frac{R^2 (R^2)'' - ((R^2)')^2}{2 (R^2)^2}
-
-        The same logic applies to the solution norm :math:`\eta` for :math:`\eta`
-        and :math:`\rho` defined in classes :class:`UpdateRegLcurve` docs.
-
-        Parameters
-        ----------
-        reg : float
-            The regularization parameter :math:`\alpha`.
-
-        Returns
-        -------
-        float
-            The curvature :math:`\kappa` at the given :math:`\alpha`.
-        """
-
-        # Squared Norms of Squared Projected Norms
-        R2 = self._projected_residual_norm_sq(reg)
-        X2 = self._projected_solution_norm_sq(reg)
-
-        # Avoid divide-by-zero
-        if R2 <= self.EPS or X2 <= self.EPS:
-            return 0.0
-
-        # First and Second Derivatives of Squared Projected Norms
-        (R2_p, R2_pp, X2_p, X2_pp) = self._projected_norm_derivatives(reg)
-
-        # Log-derivatives (Chain rule applied to log(sqrt(NormSq)))
-        logR_p = 0.5 * R2_p / R2
-        logX_p = 0.5 * X2_p / X2
-
-        logR_pp = (R2 * R2_pp - R2_p**2) / (2 * R2**2)
-        logX_pp = (X2 * X2_pp - X2_p**2) / (2 * X2**2)
-
-        # Curvature formula for a parametric curve
-        num = logR_p * logX_pp - logX_p * logR_pp
-        denom = (logR_p**2 + logX_p**2) ** 1.5 + 1e-300
-
-        return num / denom
-
-    def _projected_norm_derivatives(self, reg):
-        r"""Compute analytical squared projected norms and their 1st/2nd derivatives.
-
-        **Variable Naming Convention:**
-
-        In the code, suffixes are used to represent derivatives with respect
-        to the regularization parameter :math:`\alpha`:
-
-        * **_p**: First derivative, :math:`\frac{d}{d\alpha}` (e.g., ``R2_p`` is :math:`(R^2)'`).
-        * **_pp**: Second derivative, :math:`\frac{d^2}{d\alpha^2}` (e.g., ``R2_pp`` is :math:`(R^2)''`).
-
-        Returns
-        -------
-        tuple
-            (R2_p, R2_pp, X2_p, X2_pp)
-        """
-        # SVD-based filter factors
-        fr, fx, fr_p, fr_pp, fx_p, fx_pp = self._filter_derivatives(reg)
-
-        # First and Second Derivatives of Squared Projected Norms
-        b_norm_sq = self.b_norm * self.b_norm
-        u1_sq = self.u1 * self.u1
-
-        R2_p = 2 * b_norm_sq * np.sum(u1_sq * fr * fr_p)
-        X2_p = 2 * b_norm_sq * np.sum(u1_sq * fx * fx_p)
-
-        R2_pp = 2 * b_norm_sq * np.sum(u1_sq * (fr_p**2 + fr * fr_pp))
-        X2_pp = 2 * b_norm_sq * np.sum(u1_sq * (fx_p**2 + fx * fx_pp))
-        return R2_p, R2_pp, X2_p, X2_pp
-
-    def _filter_derivatives(self, reg):
-        r"""
-        Compute first and second derivatives of Tikhonov filter factors.
-
-        The filters are defined as defined in :meth:`_residual_filter` and
-        :meth:`_solution_filter`.
-
-        The derivatives with respect to :math:`\alpha` are:
-
-        .. math::
-           f_r' = \frac{2\alpha\sigma^2}{(\sigma^2 + \alpha^2)^2}, \quad
-           f_r'' = \frac{2\sigma^2(\sigma^2 - 3\alpha^2)}{(\sigma^2 + \alpha^2)^3}
-
-        .. math::
-           f_x' = \frac{-2\alpha\sigma}{(\sigma^2 + \alpha^2)^2}, \quad
-           f_x'' = \frac{2\sigma(3\alpha^2 - \sigma^2)}{(\sigma^2 + \alpha^2)^3}
-
-        In the code, suffixes are used to represent derivatives with respect
-        to the regularization parameter :math:`\alpha`:
-
-        * **_p**: First derivative, :math:`\frac{d}{d\alpha}` (e.g., ``R2_p`` is :math:`(R^2)'`).
-        * **_pp**: Second derivative, :math:`\frac{d^2}{d\alpha^2}` (e.g., ``R2_pp`` is :math:`(R^2)''`).
-
-
-        Returns
-        -------
-        tuple
-            (fr, fx, fr_p, fr_pp, fx_p, fx_pp)
-        """
-        # Precompute reusable squared terms
-        reg2 = reg**2
-
-        # SVD-based filter factors
-        fr = self._residual_filter(reg)
-        fx = self._solution_filter(reg)
-
-        # Common denominator for Filters
-        f_denom = self.Sbsq + reg2
-
-        # First and Second Derivatives of Filter w.r.t alpha
-        fr_p = 2 * reg * self.Sbsq / f_denom**2
-        fx_p = -2 * reg * self.Sb / f_denom**2
-        fr_pp = 2 * self.Sbsq * (self.Sbsq - 3 * reg2) / f_denom**3
-        fx_pp = 2 * self.Sb * (3 * reg2 - self.Sbsq) / f_denom**3
-        return fr, fx, fr_p, fr_pp, fx_p, fx_pp
-
-    def plot_function(
-        self,
-        regalpha_limits: Optional[Tuple[float, float]] = None,
-        num_points: int = 80,
-        filepath: Optional[str] = None,
-    ):
-        r"""
-        Plot the discrepancy function over a range of regularization parameters.
-
-        Args:
-            regalpha_limits (Optional[Tuple[float, float]]):
-                The (min, max) range for :math:`\alpha`. Defaults to (self.regalpha_low, self.regalpha_high).
-            num_points (int):
-                Number of points in the grid. Defaults to 80.
-            filepath (Optional[str]):
-
-
-        Returns:
-            Tuple[np.ndarray, np.ndarray]:
-                - regalpha_grid: Array of shape (num_points,) containing :math:`\alpha` values.
-                - func_grid: Array of shape (num_points,) containing function values.
-
-        Raises:
-            ValueError: If the limits are negative or if the upper bound is not
-                        strictly greater than the lower bound.
-        """
-        regalpha_grid, func_grid, reg_idx = self._geometric_grid(
-            regalpha_limits, num_points
-        )
-
-        # Use provided axis or create one
-        fig = plt.figure(figsize=(12, 5))
-
-        # Grid Search max
-        grid_max_idx = np.argmax(func_grid)
-
-        # Compute Plot Grid Values
-        r_vals_grid = [self._projected_residual_norm_sq(reg) for reg in regalpha_grid]
-        x_vals_grid = [self._projected_solution_norm_sq(reg) for reg in regalpha_grid]
-
-        # Plot the L-curve
-        ax = fig.add_subplot(1, 2, 1)
-        ax.loglog(r_vals_grid, x_vals_grid, linestyle="-")
-
-        # Highlight the chosen alpha
-        ax.loglog(
-            r_vals_grid[reg_idx],
-            x_vals_grid[reg_idx],
-            "ro",
-            markersize=8,
-            label=rf"$\alpha={self.regalpha:.3e}$",
-        )
-        ax.loglog(
-            r_vals_grid[grid_max_idx],
-            x_vals_grid[grid_max_idx],
-            "bo",
-            markersize=8,
-            label=rf"Grid Max $\alpha={regalpha_grid[grid_max_idx]:.3e}$",
-        )
-        ax.set_xlabel(r"$\|B_k y(\alpha)-\|b\|_2 e_1\|_2$")
-        ax.set_ylabel(r"$\|x(\alpha)\|_2$")
-        ax.set_title("L-curve (projected)")
-        ax.legend()
-
-        # Plot the curvature function
-        ax2 = fig.add_subplot(1, 2, 2)
-        ax2.semilogx(regalpha_grid, func_grid, linestyle="-")
-        ax2.set_xlabel(r"$\alpha$")
-        ax2.set_ylabel("Curvature")
-        ax2.set_title("L-curve curvature (projected)")
-        ax2.set_xlim(regalpha_grid[0], regalpha_grid[-1])
-        # Highlight chosen alpha point
-        ax2.semilogx(
-            regalpha_grid[reg_idx],
-            func_grid[reg_idx],
-            "ro",
-            markersize=8,
-            label=rf"$\alpha={self.regalpha:.3e}$",
-        )
-        ax2.semilogx(
-            regalpha_grid[grid_max_idx],
-            func_grid[grid_max_idx],
-            "bo",
-            markersize=8,
-            label=rf"Grid Max $\alpha={regalpha_grid[grid_max_idx]:.3e}$",
-        )
-        ax2.legend()
-        # Dotted vertical line at chosen alpha
-        ax2.axvline(self.regalpha, color="gray", linestyle="--")
-        plt.show()
-        if filepath:
-            plt.savefig(filepath)
-        plt.close(fig)
-
-
 class UpdateRegGCV(UpdateRegBase):
     r"""Generalized Cross-Validation (GCV) method for choosing the regularisation parameter :math:`\alpha`.
 
@@ -1161,3 +1025,485 @@ class UpdateRegGCV(UpdateRegBase):
             plt.savefig(filepath)
         plt.show()
         plt.close(fig)
+
+class grid_search_mixin():
+    def grid_search(self,regalpha_limits: Optional[Tuple[float, float]] = None, 
+                    num_points: int = 200):
+        r"""
+        Perform a grid search over a range of regularization.
+
+        Args:
+            num_points (int):
+                Number of points in the grid. Defaults to 80.
+
+        Returns:
+            Tuple[float, float, np.ndarray, np.ndarray]:
+                - alpha_grid_search: The regularization parameter that maximizes curvature.
+                - func_grid_search: The maximum curvature value.
+                - func_grid: Array of function values over the grid.
+                - regalpha_grid: Array of regularization parameters over the grid.
+
+        """
+        regalpha_grid, func_grid, _ = self._geometric_grid(regalpha_limits=regalpha_limits, 
+                                                           num_points=num_points)
+
+        sign_change_idxs = []
+
+        dphi = np.array([self._func_first_derivative(a) for a in regalpha_grid])
+
+        # Remove invalid entries
+        valid = np.isfinite(dphi)
+        regalpha_grid, dphi = regalpha_grid[valid], dphi[valid]
+
+
+        # Find sign changes
+        sign_change_idxs = np.where(np.sign(dphi[:-1]) != np.sign(dphi[1:]))[0]
+
+        if len(sign_change_idxs) == 0:
+            # No sign changes: use the grid peak
+            alpha_grid_search = regalpha_grid[np.argmin(func_grid)]
+            func_grid_search = self.func(alpha_grid_search)
+        else:
+            # Idx for sign changes
+            func_sign_changes = func_grid[sign_change_idxs]
+            regalpha_sign_change = regalpha_grid[sign_change_idxs]
+            alpha_grid_search = regalpha_sign_change[np.argmin(func_sign_changes)]
+            func_grid_search = self.func(alpha_grid_search)
+        
+        return alpha_grid_search, func_grid_search, func_grid, regalpha_grid
+
+
+class UpdateRegLcurve(UpdateRegBase, grid_search_mixin):
+    r"""L-curve method for choosing the regularisation parameter :math:`\alpha`.
+
+    This rule identifies the "corner" of the L-curve—the point of maximum curvature
+    when plotting the log-norm of the solution versus the log-norm of the residual.
+
+    In the :math:`k`-th Krylov subspace, the performance of the regularised
+    solution :math:`x_\alpha` is evaluated using the following projected norms:
+
+    .. math:: \eta(\alpha) = \log \|x_\alpha\|_2, \quad \rho(\alpha) = \log \|r_\alpha\|_2
+
+    These are the logarithms of the projected solution and residual norms, respectively.
+    See :meth:`_projected_solution_norm_sq` and :meth:`_projected_residual_norm_sq` for details.
+
+    The curvature :math:`\kappa(\alpha)` is computed using exact analytical first
+    (:math:`\rho', \eta'`) and second (:math:`\rho'', \eta''`) derivatives of
+    these log-norms with respect to :math:`\alpha`:
+
+    .. math:: \kappa(\alpha) = \frac{\rho' \eta'' - \eta' \rho''}{((\rho')^2 + (\eta')^2)^{3/2}}
+
+    The algorithm finds :math:`\alpha` that maximizes the curvature :math:`\kappa(\alpha)` using
+    a bounded optimization search within the range of the current projected
+    singular values.
+
+    Parameters
+    ----------
+    tol : float
+        Relative tolerance for convergence of the regularisation parameter.
+    data_size : int
+        Number of elements in the data; corresponds to range of the operator
+        (denoted as 'm').
+    domain_size : int
+        Number of elements in the solution; corresponds to domain of the operator
+        (denoted as 'n').
+    """
+
+    def __init__(self, data_size: int, domain_size: int, tol: float = 1e-2):
+        super().__init__(data_size, domain_size, tol)
+        self.rule_type = "l-curve"
+
+    def _compute_next_regalpha(self):
+        """
+        Find alpha that maximizes curvature using a global nonconvex 1D optimizer.
+        Handles negative or nonconvex functions efficiently for scalar reg.
+        """
+        # Grid search for a robust starting point
+        x0, _, _, _ = self.grid_search()
+
+        # 3. Local Refinement: Bounded Optimization
+        res = scipy.optimize.minimize(
+            lambda reg: self.func(reg),
+            x0=x0,
+            bounds=[(self.regalpha_low, self.regalpha_high)],
+            tol=1e-10,
+        )
+
+        if res.success and np.isfinite(res.x[0]):
+            new_alpha = res.x[0]
+        else:
+            # Fallback to the grid search peak if the optimizer fails to converge
+            new_alpha = x0
+
+        return new_alpha
+
+    def func(self, reg):
+        r"""Compute the L-curve curvature :math:`\kappa(\alpha)` at a specific alpha.
+
+        This method implements the log-log space curvature formula. Although the
+        L-curve is defined in :math:`(\log\|r\|, \log\|x\|)` space, this function
+        computes the required derivatives analytically. This approach is more
+        numerically stable than computing finite-difference derivatives of the
+        log-norms, as the logarithmic functions are eliminated through differentiation,
+        avoiding potential issues with small values.
+
+        Given :math:`\rho = \log \|r\| = \frac{1}{2} \log(R^2)`, the derivatives
+        w.r.t. :math:`\alpha` are:
+
+        .. math::
+           \rho' = \frac{(R^2)'}{2 R^2}, \quad
+           \rho'' = \frac{R^2 (R^2)'' - ((R^2)')^2}{2 (R^2)^2}
+
+        The same logic applies to the solution norm :math:`\eta` for :math:`\eta`
+        and :math:`\rho` defined in classes :class:`UpdateRegLcurve` docs.
+
+        Parameters
+        ----------
+        reg : float
+            The regularization parameter :math:`\alpha`.
+
+        Returns
+        -------
+        float
+            The curvature :math:`\kappa` at the given :math:`\alpha`.
+        """
+
+        # Squared Norms of Squared Projected Norms
+        R2 = self._projected_residual_norm_sq(reg)
+        X2 = self._projected_solution_norm_sq(reg)
+
+        # Avoid divide-by-zero
+        if R2 <= self.EPS or X2 <= self.EPS:
+            return 0.0
+
+        # First and Second Derivatives of Squared Projected Norms
+        (R2_p, X2_p) = self._projected_norm_first_derivatives(reg)
+        (R2_pp, X2_pp) = self._projected_norm_second_derivatives(reg)
+
+        # Log-derivatives (Chain rule applied to log(sqrt(NormSq)))
+        logR_p = 0.5 * R2_p / R2
+        logX_p = 0.5 * X2_p / X2
+
+        logR_pp = (R2 * R2_pp - R2_p**2) / (2 * R2**2)
+        logX_pp = (X2 * X2_pp - X2_p**2) / (2 * X2**2)
+
+        # Curvature formula for a parametric curve
+        num = logR_p * logX_pp - logX_p * logR_pp
+        denom = (logR_p**2 + logX_p**2) ** 1.5 + 1e-300
+
+        return - num / denom
+    
+    def _func_first_derivative(self, reg):
+        R2 = self._projected_residual_norm_sq(reg)
+        X2 = self._projected_solution_norm_sq(reg)
+        
+        (R2_p, X2_p) = self._projected_norm_first_derivatives(reg)
+        (R2_pp, X2_pp) = self._projected_norm_second_derivatives(reg)
+        (R2_ppp, X2_ppp) = self._projected_norm_third_derivatives(reg)
+        
+        rho_p = 0.5 * R2_p / R2
+        rho_pp = (R2 * R2_pp - R2_p**2) / (2 * R2**2)
+        rho_ppp = (R2 * R2_ppp - 3 * R2_p * R2_pp + 2 * R2_p**3 / R2) / (2 * R2**2)
+        
+        eta_p = 0.5 * X2_p / X2
+        eta_pp = (X2 * X2_pp - X2_p**2) / (2 * X2**2)
+        eta_ppp = (X2 * X2_ppp - 3 * X2_p * X2_pp + 2 * X2_p**3 / X2) / (2 * X2**2)
+        
+        num = (rho_p * eta_ppp - eta_p * rho_ppp) * (rho_p**2 + eta_p**2)
+        denom = (rho_p**2 + eta_p**2)**(5/2)
+        correction = 3 * (rho_p * eta_pp - eta_p * rho_pp) * (rho_p * rho_pp + eta_p * eta_pp)
+        
+        return (num - correction) / denom
+
+    def plot_function(
+        self,
+        regalpha_limits: Optional[Tuple[float, float]] = None,
+        num_points: int = 80,
+        filepath: Optional[str] = None,
+    ):
+        r"""
+        Plot the discrepancy function over a range of regularization parameters.
+
+        Args:
+            regalpha_limits (Optional[Tuple[float, float]]):
+                The (min, max) range for :math:`\alpha`. Defaults to (self.regalpha_low, self.regalpha_high).
+            num_points (int):
+                Number of points in the grid. Defaults to 80.
+            filepath (Optional[str]):
+
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]:
+                - regalpha_grid: Array of shape (num_points,) containing :math:`\alpha` values.
+                - func_grid: Array of shape (num_points,) containing function values.
+
+        Raises:
+            ValueError: If the limits are negative or if the upper bound is not
+                        strictly greater than the lower bound.
+        """
+        # Use provided axis or create one
+        fig = plt.figure(figsize=(12, 5))
+
+        # Grid search for a robust starting point
+        alpha_grid_search, func_grid_search, func_grid, regalpha_grid = self.grid_search(
+            regalpha_limits=regalpha_limits,
+            num_points=num_points
+        )
+
+        # Compute Plot Grid Values
+        r_vals_grid = [self._projected_residual_norm_sq(reg) for reg in regalpha_grid]
+        x_vals_grid = [self._projected_solution_norm_sq(reg) for reg in regalpha_grid]
+
+        # Plot the L-curve
+        ax = fig.add_subplot(1, 2, 1)
+        ax.loglog(r_vals_grid, x_vals_grid, linestyle="-")
+
+        # Highlight the chosen alpha
+        ax.loglog(
+            self._projected_residual_norm_sq(self.regalpha),
+            self._projected_solution_norm_sq(self.regalpha),
+            "ro",
+            markersize=8,
+            label=rf"$\alpha={self.regalpha:.3e}$",
+        )
+        ax.loglog(
+            self._projected_residual_norm_sq(alpha_grid_search),
+            self._projected_solution_norm_sq(alpha_grid_search),
+            "bo",
+            markersize=8,
+            label=rf"Grid Max $\alpha={alpha_grid_search:.3e}$",
+        )
+        ax.set_xlabel(r"$\|B_k y(\alpha)-\|b\|_2 e_1\|_2$")
+        ax.set_ylabel(r"$\|x(\alpha)\|_2$")
+        ax.set_title("L-curve (projected)")
+        ax.legend()
+
+        # Plot the curvature function
+        ax2 = fig.add_subplot(1, 2, 2)
+        ax2.semilogx(regalpha_grid, -func_grid, linestyle="-")
+        ax2.set_xlabel(r"$\alpha$")
+        ax2.set_ylabel("Curvature")
+        ax2.set_title("L-curve curvature (projected)")
+        ax2.set_xlim(regalpha_grid[0], regalpha_grid[-1])
+        # Highlight chosen alpha point
+        ax2.semilogx(
+            self.regalpha,
+            -self.func(self.regalpha),
+            "ro",
+            markersize=8,
+            label=rf"$\alpha={self.regalpha:.3e}$",
+        )
+        ax2.semilogx(
+            alpha_grid_search,
+            -func_grid_search,
+            "bo",
+            markersize=8,
+            label=rf"Grid Max $\alpha={alpha_grid_search:.3e}$",
+        )
+        ax2.legend()
+        # Dotted vertical line at chosen alpha
+        ax2.axvline(self.regalpha, color="gray", linestyle="--")
+        plt.show()
+        if filepath:
+            plt.savefig(filepath)
+        plt.close(fig)
+
+class UpdateRegReginska(UpdateRegBase, grid_search_mixin):
+    r"""Reginska's Rule for choosing the regularization parameter :math:`\alpha`.
+
+    This rule identifies the optimal :math:`\alpha` by minimizing the functional:
+    .. math:: \Phi(\alpha) = \log(\|r_\alpha\|_2^2) + \mu \log(\|x_\alpha\|_2^2)
+
+    where :math:`r_\alpha` is the projected residual, :math:`x_\alpha` is the
+    projected solution, and :math:`\mu` is a user-defined parameter that balances
+    the influence of the solution norm.
+
+    Parameters
+    ----------
+    tol : float
+        Relative tolerance for convergence of the regularisation parameter.
+    data_size : int
+        Number of elements in the data; corresponds to range of the operator
+        (denoted as 'm').
+    domain_size : int
+        Number of elements in the solution; corresponds to domain of the operator
+        (denoted as 'n').
+    mu : float, optional
+        The balancing parameter :math:`\mu` in the Reginska functional. Defaults to 1.0. Increasing
+        :math:`\mu` places more emphasis on minimizing the solution norm.
+    """
+
+    def __init__(self, data_size: int, domain_size: int, tol: float = 1e-2, mu: float = 1.0):
+        super().__init__(data_size, domain_size, tol)
+        self.rule_type = "reginska"
+        self.mu = mu
+
+    def _compute_next_regalpha(self):
+        """
+        Compute the next regularization parameter using derivative-based
+        Regińska minimization.
+
+        Strategy:
+        1. Sample Phi'(alpha) on a log grid.
+        2. Detect sign changes (candidate stationary points).
+        3. Refine roots with Brent's method.
+        4. Reject flat / unstable minima.
+        """
+        # Grid search for a starting point
+        x0, _, _, _ = self.grid_search()
+
+        # Local Refinement: Bounded Optimization
+        res = scipy.optimize.minimize(
+            self.func,
+            x0=x0,
+            bounds=[(self.regalpha_low, self.regalpha_high)],
+            tol=1e-10
+        )
+        return res.x[0] if res.success and np.isfinite(res.x[0]) else x0
+
+
+    def func(self, regalpha):
+        """Log-Reginska functional: log(R^2) + mu * log(X^2)."""
+        r2 = self._projected_residual_norm_sq(regalpha)
+        x2 = self._projected_solution_norm_sq(regalpha)
+        
+        if r2 <= self.EPS or x2 <= self.EPS:
+            return 1e30 
+            
+        return 0.5 * (np.log(r2) + self.mu * np.log(x2))
+
+    def _func_first_derivative(self, regalpha):
+        """
+        Derivative of the Log-Reginska functional with respect to alpha.
+
+        .. math::
+            `\Phi(\alpha) = \tfrac12(\log\|r_\alpha\|_2^2 + \mu \log\|x_\alpha\|_2^2),
+            \quad
+            \frac{d\Phi}{d\alpha}
+            = \tfrac12\left(
+            \frac{1}{\|r_\alpha\|_2^2}\frac{d}{d\alpha}\|r_\alpha\|_2^2
+            + \mu \frac{1}{\|x_\alpha\|_2^2}\frac{d}{d\alpha}\|x_\alpha\|_2^2
+            \right)`
+        
+        Returns
+        -------
+        float
+            The derivative value.
+        """
+        R2 = self._projected_residual_norm_sq(regalpha)
+        X2 = self._projected_solution_norm_sq(regalpha)
+        (R2_p, X2_p) = self._projected_norm_first_derivatives(regalpha)
+
+        # Use a small epsilon for the denominator instead of a hard jump to 1e30
+        denom_r = max(R2, self.EPS)
+        denom_x = max(X2, self.EPS)
+
+        return 0.5 * (R2_p / denom_r + self.mu * X2_p / denom_x)
+
+    def plot_function(self, regalpha_limits=None, num_points=80, filepath=None):
+        """
+        Plot the Reginska functional and L-curve over a range of regularization parameters.
+        """
+        # Grid search for a robust starting point
+        alpha_grid_search, func_grid_search, func_grid, regalpha_grid = self.grid_search(
+            regalpha_limits=regalpha_limits,
+            num_points=num_points
+        )
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+        # Compute Plot Grid Values
+        r_vals_grid = [self._projected_residual_norm_sq(reg) for reg in regalpha_grid]
+        x_vals_grid = [self._projected_solution_norm_sq(reg) for reg in regalpha_grid]
+
+        # Plot the L-curve
+        ax1.loglog(r_vals_grid, x_vals_grid, linestyle="-")
+
+        # Highlight the chosen alpha
+        ax1.loglog(
+            self._projected_residual_norm_sq(self.regalpha),
+            self._projected_solution_norm_sq(self.regalpha),
+            "ro",
+            markersize=8,
+            label=rf"$\alpha={self.regalpha:.3e}$",
+        )
+        ax1.loglog(
+            self._projected_residual_norm_sq(alpha_grid_search),
+            self._projected_solution_norm_sq(alpha_grid_search),
+            "bo",
+            markersize=8,
+            label=rf"Grid Max $\alpha={alpha_grid_search:.3e}$",
+        )
+        ax1.set_xlabel(r"$\|B_k y(\alpha)-\|b\|_2 e_1\|_2$")
+        ax1.set_ylabel(r"$\|x(\alpha)\|_2$")
+        ax1.set_title("L-curve (projected)")
+        ax1.legend()
+        
+        
+        # Plot exp(func) to show the original Psi scale
+        ax2.loglog(regalpha_grid, np.exp(func_grid), color='tab:red', label=r"$\Psi(\alpha)$")
+        ax2.set_title(rf"Reginska Functional ($\mu={self.mu}$)")
+        ax2.set_xlabel(r"$\alpha$")
+        ax2.set_ylabel(r"$\Psi(\alpha)$")
+        ax2.semilogx(
+            self.regalpha,
+            np.exp(self.func(self.regalpha)),
+            "ro",
+            markersize=8,
+            label=rf"$\alpha={self.regalpha:.3e}$",
+        )
+        ax2.semilogx(
+            alpha_grid_search,
+            np.exp(func_grid_search),
+            "bo",
+            markersize=8,
+            label=rf"Grid Max $\alpha={alpha_grid_search:.3e}$",
+        )
+        ax2.legend()
+        ax2.axvline(self.regalpha, color="gray", linestyle=":")
+
+        plt.tight_layout()
+        if filepath: plt.savefig(filepath)
+        plt.show()
+        plt.close(fig)
+
+class UpdateRegUPRE(UpdateRegBase):
+    r"""Unbiased Predictive Risk Estimator (UPRE) for choosing :math:`\alpha`.
+
+    .. math:: U(\alpha) = \frac{1}{m} \|r_\alpha\|_2^2 + \frac{2\sigma^2}{m} \text{trace}(A_\alpha) - \sigma^2
+    """
+
+    def __init__(self, data_size: int, domain_size: int, tol: float = 1e-2, noise_variance: float = 0.0):
+        super().__init__(data_size, domain_size, tol)
+        self.rule_type = "upre"
+        self.sigma2 = noise_variance
+
+    def _compute_next_regalpha(self):
+        regalpha_grid, func_grid, _ = self._geometric_grid()
+        x0 = regalpha_grid[np.argmin(func_grid)]
+
+        res = scipy.optimize.minimize(
+            self.func,
+            x0=x0,
+            bounds=[(self.regalpha_low + self.EPS, self.regalpha_high)],
+            tol=1e-10
+        )
+        return res.x[0] if res.success else x0
+
+    def func(self, regalpha):
+        r2 = self._projected_residual_norm_sq(regalpha)
+        trace_A = np.sum(self.Sbsq / (self.Sbsq + regalpha**2))
+        return (1.0 / self.m) * r2 + (2.0 * self.sigma2 / self.m) * trace_A - self.sigma2
+
+    def plot_function(self, regalpha_limits=None, num_points=80, filepath=None):
+        regalpha_grid, func_grid, reg_idx = self._geometric_grid(regalpha_limits, num_points)
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.semilogx(regalpha_grid, func_grid, label="UPRE $U(\\alpha)$")
+        ax.semilogx(regalpha_grid[reg_idx], func_grid[reg_idx], "ro", label=rf"$\alpha={self.regalpha:.3e}$")
+        ax.set_xlabel(r"$\alpha$")
+        ax.set_ylabel(r"$U(\alpha)$")
+        ax.set_title("UPRE Function Minimization")
+        ax.grid(True, which="both", alpha=0.5)
+        ax.legend()
+        if filepath:
+            plt.savefig(filepath)
+        plt.show()
