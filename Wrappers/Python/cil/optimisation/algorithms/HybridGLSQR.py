@@ -191,7 +191,7 @@ class HybridGLSQR(GLSQR):
         # Select regularisation parameter
         self.reg_rule.update_regularizationparam(Bk=Bk, b_norm=self.betavec[0])
 
-        # Sync the solver's regalpha with the rule's current suggestion
+        # Update regularisation parameter in solver
         self.regalpha = self.reg_rule.regalpha
 
     def update_objective(self):
@@ -199,6 +199,8 @@ class HybridGLSQR(GLSQR):
         super().update_objective()
 
         if self.reg_rule.converged:
+            # Sync the solver's regalpha with the rule's current suggestion
+            self.regalpha = self.reg_rule.regalpha
             self.iteration = self.reg_rule.iteration
             log.info(
                 "Hybrid LSQR stopping criterion reached at iteration %d", self.iteration
