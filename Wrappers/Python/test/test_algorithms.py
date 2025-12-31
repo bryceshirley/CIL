@@ -2315,6 +2315,41 @@ class TestGLSQR(CCPiTestClass):
         self.assertNumpyArrayAlmostEqual(glsqr.v.as_array(), v_new.as_array())
         self.assertNumpyArrayAlmostEqual(glsqr.x.as_array(), expected_x.as_array())
         self.assertNumpyArrayAlmostEqual(glsqr.d.as_array(), expected_d.as_array())
+    
+    def test_K_operator_adjoint_consistency(self):
+        """Verify that _apply_K and _apply_K_adjoint are true adjoints
+        with wavelet operator."""
+        # Setup for a wavelet operator
+        self.n = 64
+        self.m = 70
+        A = np.random.uniform(0, 1, (self.m, self.n)).astype('float32')
+        Aop = MatrixOperator(A)
+        wo = WaveletOperator(Aop.domain_geometry())
+        
+        glsqr = GLSQR(operator=Aop, data=Aop.range_geometry().allocate(0), 
+                      struct_operator=wo)
+        
+        domain_geom = glsqr.operator.domain_geometry()
+        range_geom = glsqr.operator.range_geometry()
+
+        # 1. Create random vectors in Domain (weighted space) and Range
+        v = domain_geom.allocate('random')  # Weighted space
+        u = range_geom.allocate('random')  # Data space
+
+        # 2. Apply K: b = K v
+        Kv = range_geom.allocate(0)
+        glsqr._apply_K(v, out=Kv)
+
+        # 3. Apply K*: w = K* u
+        KstarU = domain_geom.allocate(0)
+        glsqr._apply_K_adjoint(u, out=KstarU)
+
+        # 4. Check <Kv, u> == <v, K*u>
+        dot1 = Kv.dot(u)
+        dot2 = v.dot(KstarU)
+
+        self.assertAlmostEqual(dot1, dot2, places=4, 
+                               msg="K and K* are not consistent adjoints!")
 
 
 class TestHybridGLSQR(CCPiTestClass):

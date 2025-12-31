@@ -138,9 +138,9 @@ class GLSQROperator(LinearOperator):
             self.L_struct = IdentityOperator(domain_geometry)
 
         # Validate that the structural operator has an inverse method
-        if not hasattr(self.L_struct, "inverse"):
+        if not hasattr(self.L_struct, "inverse") and not hasattr(self.L_struct, "inverse_adjoint"):
             raise ValueError(
-                "The provided structural_operator must have an 'inverse' method implemented."
+                "The provided structural_operator must have an 'inverse' and 'inverse_adjoint' method implemented."
             )
 
         # Set norm type
@@ -231,6 +231,29 @@ class GLSQROperator(LinearOperator):
         else:
             self.L_norm.inverse(x, out=out)
             return self.L_struct.inverse(out, out=out)
+    
+    def inverse_adjoint(self, x, out=None):
+        r"""Returns the adjoint of the inverse :math:`\tilde{L}^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
+
+        Parameters
+        ----------
+        x : DataContainer or BlockDataContainer
+            Input data
+        out : DataContainer or BlockDataContainer, optional
+            If out is not None the output of the Operator will be filled in out, 
+            otherwise a new object is instantiated and returned. The default is None.
+
+        Returns
+        -------
+        DataContainer or BlockDataContainer
+            :math:`\tilde{L}^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
+        """
+        if out is None:
+            temp = self.L_norm.inverse_adjoint(x)
+            return self.L_struct.inverse_adjoint(temp)
+        else:
+            self.L_norm.inverse_adjoint(x, out=out)
+            return self.L_struct.inverse_adjoint(out, out=out)
 
     def update_weights(self, x: DataContainer, domain: str = "image"):
         """

@@ -234,7 +234,44 @@ class TestWavelets(CCPiTestClass):
                 M = x.norm() # Normalization
                 self.assertAlmostEqual(ip1/M, ip2/M, places=5, msg="Periodization convolution should be closest to true adjoint")
     
-    def test_wavelet_inverse_full(self):
+    def test_WaveletOperator_inverse_adjoint(self):
+        m, n = 64, 64
+        dg = ImageGeometry(voxel_num_x=m, voxel_num_y=n) # Domain
+        x = dg.allocate('random', seed=3)
+        for wname in ['haar', 'db2', 'db3', 'db4', 'sym2', 'sym3', 'coif2', 'coif3', 'bior3.5', 'bior3.3', 'rbio3.5', 'rbio3.3']:
+            with self.subTest(msg=f"Failed for wavelet {wname}", wname=wname):
+                W = WaveletOperator(dg, wname=wname, level=2, bnd_cond='periodization') # Note: this is different from bnd_cond='periodic'
+                rg = W.range_geometry()
+                c = rg.allocate('random', seed=4)
+
+                ip1 = c.dot(W.adjoint(x))
+                ip2 = x.dot(W.inverse_adjoint(c))
+                M = x.norm() # Normalization
+                self.assertAlmostEqual(ip1/M, ip2/M, places=5, msg="Periodization convolution should be closest to true adjoint")
+    
+
+    def test_wavelet_inverse_adjoint_inverse(self):
+        """Test reconstruction using the inverse adjoint pair."""
+        m, n = 64, 64
+        dg = ImageGeometry(voxel_num_x=m, voxel_num_y=n)
+        x = dg.allocate('random', seed=3)
+        
+        # Test primarily for orthogonal wavelets where this is well-scaled
+        for wname in ['haar', 'db2', 'db3', 'sym2']:
+            with self.subTest(wname=wname):
+                W = WaveletOperator(dg, wname=wname, level=2, bnd_cond='periodization')
+                
+                # (L^*)^-1 ( L^* x ) = x
+                # L^* is adjoint, (L^*)^-1 is inverse_adjoint
+                Wx = W.adjoint(x)
+                x_recov = W.inverse_adjoint(Wx)
+                
+                M = x.norm()
+                diff_norm = (x_recov - x).norm() / M
+                self.assertAlmostEqual(diff_norm, 0, places=5)
+    
+    
+    def test_wavelet_inverse(self):
         m, n = 48, 64
         dg = ImageGeometry(voxel_num_x=m, voxel_num_y=n)
         x = dg.allocate('random', seed=3)

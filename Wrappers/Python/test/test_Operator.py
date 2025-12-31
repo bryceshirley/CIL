@@ -150,6 +150,20 @@ class TestOperator(CCPiTestClass):
         norm1 = D.norm()
         numpy.testing.assert_almost_equal(norm1, numpy.max(numpy.abs(diag.array)))
 
+        # Check Inverse Adjoint: (D^-1)* = 1/conj(D)
+        inv_adj_x = D.inverse_adjoint(x)
+        expected_inv_adj = (1 / diag.conjugate()) * x
+        numpy.testing.assert_allclose(inv_adj_x.as_array(), expected_inv_adj.as_array(), atol=1e-6)
+
+        # Adjoint Identity for the inverse: <D^-1 v, u> == <v, (D^-1)* u>
+        u = ig.allocate('random', seed=102, dtype=numpy.complex64)
+        v = ig.allocate('random', seed=103, dtype=numpy.complex64)
+        dot1 = D.inverse(v).dot(u)
+        dot2 = v.dot(D.inverse_adjoint(u))
+        
+        # Normalized comparison for numerical stability
+        self.assertAlmostEqual(dot1/u.norm(), dot2/u.norm(), places=5)
+
     def test_MaskOperator(self):
         M = 3
         ig = ImageGeometry(M, M)
@@ -246,6 +260,21 @@ class TestOperator(CCPiTestClass):
         self.assertTrue(Id.is_linear())
 
         #Check is_orthogonal
+        self.assertTrue(Id.is_orthogonal())
+
+        # Check Inverse Adjoint
+        # For Identity, (Id^-1)* should be identity
+        y_inv_adj = Id.inverse_adjoint(img)
+        numpy.testing.assert_array_equal(y_inv_adj.as_array(), img.as_array())
+
+        # Dot product test for inverse_adjoint: <L^-1 v, u> == <v, (L^-1)* u>
+        u = ig.allocate('random', seed=2)
+        v = ig.allocate('random', seed=3)
+        dot1 = Id.inverse(v).dot(u)
+        dot2 = v.dot(Id.inverse_adjoint(u))
+        self.assertAlmostEqual(dot1, dot2, places=5)
+
+        self.assertTrue(Id.is_linear())
         self.assertTrue(Id.is_orthogonal())
 
     def test_FiniteDifference(self):
