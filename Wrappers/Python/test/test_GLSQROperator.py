@@ -25,17 +25,18 @@ from cil.optimisation.operators import (
     DiagonalOperator,
     GLSQROperator,
     LinearOperator,
+    WaveletOperator,
 )
 from testclass import CCPiTestClass
 
 
 class TestGLSQROperator(CCPiTestClass):
     def setUp(self):
-        M = 3
+        # Use a power-of-two size for Wavelet compatibility
+        M = 16 
         self.ig = ImageGeometry(M, M)
         self.x = self.ig.allocate("random", seed=100)
 
-        # FIX: Use a constant diagonal so L_struct is a simple scaling
         self.scaling_val = 2.0
         diag = self.ig.allocate(self.scaling_val)
         self.L_struct = DiagonalOperator(diag)
@@ -235,6 +236,125 @@ class TestGLSQROperator(CCPiTestClass):
         op = GLSQROperator(self.ig, norm_type="L1", tau=tau_val)
         self.assertEqual(op._tau, tau_val)  # check internal
         self.assertEqual(op.tau, tau_val)  # check property access
+
+    def test_wavelet_struct_operator(self):
+        """Tests GLSQROperator with WaveletOperator as L_struct."""
+        try:
+            # Initialize WaveletOperator (Haar is orthogonal, so inverse=adjoint)
+            W = WaveletOperator(self.ig, wavelet='haar', level=1)
+        except ImportError:
+            self.skipTest("PyWavelets not installed, skipping Wavelet test.")
+
+        # 1. Test L2 Norm: L_tilde = I * W = W
+        op = GLSQROperator(self.ig, struct_operator=W, norm_type="L2")
+        
+        # Test Direct/Inverse consistency
+        # x_rec = W^-1( I^-1( I( W(x) ) ) )
+        y = op.direct(self.x)
+        x_rec = op.inverse(y)
+        np.testing.assert_allclose(x_rec.as_array(), self.x.as_array(), atol=1e-5)
+
+        # Dot test: Verify adjoint consistency
+        # For orthogonal wavelets, W^* = W^-1. Since L_norm=I, 
+        # the GLSQROperator itself should satisfy the dot test.
+        self.assertTrue(op.dot_test(op))
+
+        # 2. Test L1 Norm: L_tilde = D * W
+        tau = 0.1
+        op_l1 = GLSQROperator(self.ig, struct_operator=W, norm_type="L1", tau=tau)
+        
+        # Verify Inverse logic for L1
+        # x_rec = W^-1( D^-1( y ) )
+        y_l1 = op_l1.direct(self.x)
+        x_rec_l1 = op_l1.inverse(y_l1)
+        np.testing.assert_allclose(x_rec_l1.as_array(), self.x.as_array(), atol=1e-5)
+
+    def test_inverse_with_scaling_struct(self):
+        """Standard test for inverse with the setup's scaling operator."""
+        op = GLSQROperator(self.ig, struct_operator=self.L_struct, norm_type="L2")
+        x = self.ig.allocate("random", seed=2)
+
+        # Inverse: L_struct^-1 ( L_norm^-1 (x) )
+        y = op.direct(x)
+        x_rec = op.inverse(y)
+        np.testing.assert_allclose(x_rec.as_array(), x.as_array(), atol=1e-5)
+
+    def test_inverse_adjoint_L2(self):
+        """Test inverse_adjoint for L2 regularization: (L_struct^*)^-1"""
+        # L2 case: L_tilde = I * L_struct
+        op = GLSQROperator(self.ig, struct_operator=self.L_struct, norm_type="L2")
+        
+        # Test vector in the range of the operator
+        y = op.range_geometry().allocate("random", seed=50)
+        u = op.domain_geometry().allocate("random", seed=60)
+        
+        # Identity: <L_inv v, u> == <v, L_inv_adj u>
+        # L_inv = L_struct^-1
+        # L_inv_adj = (L_struct^*)^-1
+        
+        L_inv_v = op.inverse(y)
+        L_inv_adj_u = op.inverse_adjoint(u)
+        
+        dot1 = L_inv_v.dot(u)
+        dot2 = y.dot(L_inv_adj_u)
+        
+        self.assertAlmostEqual(dot1, dot2, places=5)
+
+    def test_inverse_adjoint_L1(self):
+        """Test inverse_adjoint for L1 weighting: (L_struct^* * L_norm^*)^-1"""
+        tau = 0.5
+        op = GLSQROperator(self.ig, struct_operator=self.L_struct, norm_type="L1", tau=tau)
+        
+        # y is in Range (weighted wavelet space), u is in Domain (Image space)
+        y = op.range_geometry().allocate("random", seed=70)
+        u = op.domain_geometry().allocate("random", seed=80)
+        
+        # Perform inverse and inverse_adjoint
+        res_inv = op.inverse(y)
+        res_inv_adj = op.inverse_adjoint(u)
+        
+        # Adjoint identity for the inverse
+        dot1 = res_inv.dot(u)
+        dot2 = y.dot(res_inv_adj)
+        
+        self.assertAlmostEqual(dot1, dot2, places=5)
+
+    def test_wavelet_inverse_adjoint(self):
+        """Verify GLSQROperator.inverse_adjoint with WaveletOperator."""
+        try:
+            from cil.optimisation.operators import WaveletOperator
+            # Use Daubechies wavelet (not self-adjoint, but orthogonal)
+            W = WaveletOperator(self.ig, wavelet='db2', level=1)
+        except (ImportError, ModuleNotFoundError):
+            self.skipTest("PyWavelets not installed, skipping Wavelet test.")
+
+        op = GLSQROperator(self.ig, struct_operator=W, norm_type="L2")
+        
+        u = op.domain_geometry().allocate('random', seed=10)
+        v = op.range_geometry().allocate('random', seed=20)
+        
+        # L_inv = W^-1
+        # L_inv_adj = (W^*)^-1 = W (since W is orthogonal)
+        L_inv_v = op.inverse(v)
+        L_inv_adj_u = op.inverse_adjoint(u)
+        
+        dot1 = L_inv_v.dot(u)
+        dot2 = v.dot(L_inv_adj_u)
+        
+        # Normalize to ensure precision check is scale-invariant
+        scale = u.norm() * v.norm()
+        self.assertAlmostEqual(dot1/scale, dot2/scale, places=5)
+
+    def test_inverse_adjoint_out(self):
+        """Verify the 'out' parameter in inverse_adjoint."""
+        op = GLSQROperator(self.ig, struct_operator=self.L_struct)
+        u = self.ig.allocate("random")
+        out_inv_adj = self.ig.allocate()
+        
+        op.inverse_adjoint(u, out=out_inv_adj)
+        expected = op.inverse_adjoint(u)
+        
+        np.testing.assert_allclose(out_inv_adj.as_array(), expected.as_array())
 
 
 if __name__ == "__main__":

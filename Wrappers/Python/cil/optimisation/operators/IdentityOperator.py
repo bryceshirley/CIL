@@ -116,6 +116,30 @@ class IdentityOperator(LinearOperator):
         else:
             out.fill(x)
             return out
+    
+    def inverse_adjoint(self, x, out=None):
+        r"""Returns the value of the adjoint of the inverse :math:`(L^{-1})^*` applied to :math:`x`.
+
+        For the Identity operator, this is simply the input data :math:`x`.
+
+        Parameters
+        ----------
+        x : DataContainer or BlockDataContainer
+            Input data
+        out : DataContainer or BlockDataContainer, optional
+            If out is not None the output of the Operator will be filled in out, 
+            otherwise a new object is instantiated and returned. The default is None.
+
+        Returns
+        -------
+        DataContainer or BlockDataContainer
+            :math:`(L^{-1})^*(x) = x`
+        """
+        if out is None:
+            return x.copy()
+        else:
+            out.fill(x)
+            return out
 
     def calculate_norm(self, **kwargs):
 

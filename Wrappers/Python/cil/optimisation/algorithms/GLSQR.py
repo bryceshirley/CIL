@@ -315,7 +315,7 @@ class GLSQR(Algorithm):
     def _apply_K_adjoint(self, u, out):
         """Apply effective adjoint K* = L_inv * A_adj"""
         self.operator.adjoint(u, out=self.tmp_domain)
-        return self.weight_operator.inverse(self.tmp_domain, out=out)
+        return self.weight_operator.inverse_adjoint(self.tmp_domain, out=out)
 
     def _initialize_GKB(self):
         """

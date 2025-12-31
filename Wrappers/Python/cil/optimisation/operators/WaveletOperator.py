@@ -247,6 +247,80 @@ class WaveletOperator(LinearOperator):
         else:
             out.fill(x[org_size])
             return out
+        
+    def _decompose(self, x, wavelet, out=None):
+        r"""Helper function to decompose from wavelet coefficients using specified wavelet
+        Parameters
+        ----------
+        x : DataContainer
+            Input data to decompose
+        wavelet : pywt.Wavelet
+            Wavelet to use for compose
+        out: return DataContainer, if None a new DataContainer is returned, default None.
+
+        Returns
+        --------
+        DataContainer, the reconstructed data or `None` if `out`
+        """
+        x_arr = x.as_array()
+        
+        # Perform decomposition using PyWavelets
+        coeffs = pywt.wavedecn(
+            x_arr, wavelet=wavelet, level=self.level, axes=self.axes, mode=self.bnd_cond)
+
+        Wx, _ = pywt.coeffs_to_array(coeffs, axes=self.axes)
+
+        if out is None:
+            ret = self.range_geometry().allocate(dtype=x.dtype)
+            ret.fill(Wx)
+            return ret
+        else:
+            out.fill(Wx)
+            return out
+
+    def direct(self, x, out=None):
+        r"""Returns the value of the WaveletOperator applied to :math:`x`
+
+
+        Parameters
+        ----------
+        x : DataContainer
+
+        out: return DataContainer, if None a new DataContainer is returned, default None.
+
+        Returns
+        --------
+        DataContainer, the value of the WaveletOperator applied to :math:`x` or `None` if `out`
+
+        """
+        # Direct always uses self._wavelet (which might be the adjoint filters 
+        # for biorthogonal cases if true_adjoint=True)
+        return self._decompose(x, self._wavelet, out=out)
+
+    def inverse_adjoint(self, x, out=None):
+        r"""Returns the value of the adjoint of the inverse :math:`(L^{-1})^*` applied to :math:`x`.
+
+        For orthogonal and biorthogonal wavelets, the adjoint of the inverse is equal 
+        to the inverse of the adjoint: :math:`(L^{-1})^* = (L^*)^{-1}`.
+        This operation is implemented as a forward wavelet transform (decomposition) 
+        using the natural wavelet filters.
+
+        Parameters
+        ----------
+        x : DataContainer
+            Input data in the domain geometry (Image space).
+        out : DataContainer, optional
+            If not None, the output of the operator will be filled in ``out``, 
+            otherwise a new object is instantiated and returned. Default is None.
+
+        Returns
+        -------
+        DataContainer
+            The wavelet coefficients resulting from :math:`(L^{-1})^* x`, 
+            or ``None`` if ``out`` is provided.
+        """
+        # (L^*)^-1 is a decomposition using the natural/original filters
+        return self._decompose(x, self._natural_wavelet, out=out)
 
     def adjoint(self, Wx, out=None):
         r"""Returns the value of the adjoint of the WaveletOperator applied to :math:`x`
