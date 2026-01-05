@@ -2350,6 +2350,50 @@ class TestGLSQR(CCPiTestClass):
 
         self.assertAlmostEqual(dot1, dot2, places=4, 
                                msg="K and K* are not consistent adjoints!")
+    
+    def test_glsqr_l2_wavelet_equivalence(self):
+        """
+        Test that L2 regularization in the image domain is equivalent 
+        to L2 regularization in an orthogonal wavelet domain.
+        """
+        # Ensure n is power of 2 for Wavelet stability
+        self.n = 64
+        self.m = 80
+        A = np.random.uniform(0, 1, (self.m, self.n)).astype('float32')
+        Aop = MatrixOperator(A)
+        ig = Aop.domain_geometry()
+        b = Aop.range_geometry().allocate('random', seed=5)
+        
+        alpha = 0.5
+        n_iters = 20
+
+        # 1. GLSQR with Standard L2 (Identity structure)
+        glsqr_standard = GLSQR(operator=Aop, data=b, regalpha=alpha, 
+                               reg_norm_type='L2', struct_operator=IdentityOperator(ig))
+        glsqr_standard.run(n_iters)
+        x_standard = glsqr_standard.get_output()
+
+        # 2. GLSQR with Wavelet L2 (Haar is orthogonal)
+        # For orthogonal W, ||Wu||_2 = ||u||_2, so solutions must match.
+        wo = WaveletOperator(ig, wname='haar', level=1)
+        glsqr_wavelet = GLSQR(operator=Aop, data=b, regalpha=alpha, 
+                              reg_norm_type='L2', struct_operator=wo)
+        glsqr_wavelet.run(n_iters)
+        x_wavelet = glsqr_wavelet.get_output()
+
+        # 3. Check equivalence
+        # They should converge to the same point in image space
+        self.assertNumpyArrayAlmostEqual(x_standard.as_array(), 
+                                         x_wavelet.as_array(), decimal=4)
+        
+        # Check that the objective function values are similar
+        res_std = (Aop.direct(x_standard) - b).norm()**2
+        reg_std = alpha**2 * x_standard.norm()**2
+        
+        res_wav = (Aop.direct(x_wavelet) - b).norm()**2
+        reg_wav = alpha**2 * wo.direct(x_wavelet).norm()**2 # ||Wu||^2
+        
+        self.assertAlmostEqual(res_std + reg_std, res_wav + reg_wav, places=4)
 
 
 class TestHybridGLSQR(CCPiTestClass):
