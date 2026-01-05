@@ -482,3 +482,61 @@ class TestGradientOperator(unittest.TestCase):
             Grad.operator.fd = Mock(return_value=-1)
             with self.assertRaises(RuntimeError):
                 Grad.adjoint(res_direct)
+    
+    def test_inverse(self):
+        config = self.test_backend_configurations[1]
+        M = 3
+        ig = ImageGeometry(M, M)
+        x = ig.allocate('random',seed=100)
+
+        for bnd in config.get('bconditions'):
+            for method in config.get('method'):
+                Grad = GradientOperator(ig,
+                                        bnd_cond = bnd,
+                                        method=method)
+
+                # Test inverse reconstruction
+                y = Grad.inverse(x)
+                x_rec = Grad.direct(y)
+                try:
+                    numpy.testing.assert_array_almost_equal(x_rec.array,
+                                                    x.array)
+                except:
+                    self.print_assertion_info(ig,bnd,method)
+                    raise
+    
+    def test_inverse_adjoint(self):
+        config = self.test_backend_configurations[1]
+        M = 4
+        ig = ImageGeometry(M, M)
+        x = ig.allocate('random',seed=200)
+
+        for bnd in config.get('bconditions'):
+            for method in config.get('method'):
+                Grad = GradientOperator(ig,
+                                        bnd_cond = bnd,
+                                        method=method)
+                
+                # Adjoint for the inverse: <D^-1 v, u> == <v, (D^-1)* u>
+                u = Grad.domain_geometry().allocate('random', seed=5)
+                v = Grad.range_geometry().allocate('random', seed=6)
+                dot1 = Grad.inverse(v).dot(u)
+                dot2 = v.dot(Grad.inverse_adjoint(u))
+
+                try:
+                    self.assertAlmostEqual(dot1/u.norm(), dot2/u.norm(), places=5)
+                except:
+                    self.print_assertion_info(ig,bnd,method)
+                    raise
+
+                # Test inverse adjoint reconstruction
+                y = Grad.inverse_adjoint(x)
+                x_rec = Grad.adjoint(y)
+                try:
+                    numpy.testing.assert_array_almost_equal(x_rec.array,
+                                                    x.array)
+                except:
+                    self.print_assertion_info(ig,bnd,method)
+                    raise
+    
+
