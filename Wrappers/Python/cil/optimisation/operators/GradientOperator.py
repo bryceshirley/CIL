@@ -16,12 +16,16 @@
 # Authors:
 # CIL Developers, listed at: https://github.com/TomographicImaging/CIL/blob/master/NOTICE.txt
 
+import functools
 from cil.optimisation.operators import LinearOperator
 from cil.optimisation.operators import FiniteDifferenceOperator
+from cil.optimisation.operators.DiagonalOperator import DiagonalOperator
 from cil.framework import BlockGeometry, ImageGeometry, cilacc
 import logging
 from cil.utilities.multiprocessing import NUM_THREADS
 import numpy as np
+
+from scipy.fftpack import dctn, idctn, fftn, ifftn
 
 NEUMANN = 'Neumann'
 PERIODIC = 'Periodic'
@@ -153,7 +157,176 @@ class GradientOperator(LinearOperator):
         """
 
         return self.operator.adjoint(x, out=out)
+    
+    def inverse(self, x, out=None):
+        r"""
+        Pseudo-inverse of the Gradient operator.
+        y = T \Lambda^{\dagger} T* G* x
 
+        where G* is the adjoint of the Gradient operator.
+        T is the orthogonal transform to diagonalise G*G
+        and \Lambda^{\dagger} is the pseudo-inverse of the diagonal matrix of
+        eigenvalues of G*G.
+
+        The transform T is
+        - the DCT for Neumann boundary conditions
+        - the DFT for Periodic boundary conditions
+        - the DST for Dirichlet boundary conditions (not implemented)
+        
+        Parameters
+        ----------
+        x : BlockDataContainer
+            Gradient images for each dimension in ImageGeometry domain
+        out : ImageData, optional
+            pre-allocated output memory to store result
+
+        Returns
+        -------
+        ImageData
+            result data if `out` not specified
+        """
+        if getattr(self.operator, 'method', 'forward') == 'centered':
+            raise NotImplementedError("Spectral inverse not yet supported for centered differences.")
+    
+        if out is None:
+            out = self.domain_geometry().allocate()
+        
+        # 1. Map to Image Space
+        self.adjoint(x, out=out)
+        
+        # 2. Spectral Filter
+        self._spectral_inverse_core(out, 'inverse', out=out)
+        return out
+
+    def inverse_adjoint(self, x, out=None):
+        r"""
+        Pseudo-inverse of the Adjoint Gradient operator.
+        y = G T \Lambda^{\dagger} T* x
+
+        where G is the Gradient operator.
+        T is the orthogonal transform to diagonalise G*G
+        and \Lambda^{\dagger} is the pseudo-inverse-adjoint of the diagonal matrix of
+        eigenvalues of G*G.
+
+        The transform T is
+        - the DCT for Neumann boundary conditions
+        - the DFT for Periodic boundary conditions
+        - the DST for Dirichlet boundary conditions (not implemented)
+        
+        Parameters
+        ----------
+        x : ImageData
+            Image in ImageGeometry domain
+        out : BlockDataContainer, optional
+            pre-allocated output memory to store result
+
+        Returns
+        -------
+        BlockDataContainer
+            result data if `out` not specified
+        """
+        if getattr(self.operator, 'method', 'forward') == 'centered':
+            raise NotImplementedError("Spectral inverse not yet supported for centered differences.")
+
+        if out is None:
+            out = self.range_geometry().allocate()
+            
+        # 1. Filter in Image Space (Temporary ImageData)
+        filtered_image = self._spectral_inverse_core(x, 'inverse_adjoint')
+        
+        # 2. Map back to Gradient Space
+        self.direct(filtered_image, out=out)
+        return out
+
+    def _spectral_inverse_core(self, x_image_space, eig_method_name, out=None):
+        """ Shared logic for spectral filtering in image domain. """
+        T, T_inv, eig_op = self._spectral_data
+        
+        # Transform to Frequency Domain
+        freq_arr = T(x_image_space.as_array())
+        
+        target_complex_dtype = np.complex128 if x_image_space.dtype == np.float64 else np.complex64
+        
+        # Allocate temporary frequency domain container with appropriate complex dtype
+        tmp_freq = self.domain_geometry().allocate(dtype=target_complex_dtype)
+        tmp_freq.fill(freq_arr)
+
+        getattr(eig_op, eig_method_name)(tmp_freq, out=tmp_freq)
+
+        # Transform back to Spatial Image Space
+        spatial_arr = T_inv(tmp_freq.as_array()).real
+        
+        target_dtype = self.domain_geometry().dtype
+
+        if out is None:
+            out = self.domain_geometry().allocate(dtype=target_dtype)
+
+        out.fill(spatial_arr)
+
+        return out
+
+    @functools.cached_property
+    def _spectral_data(self):
+        """Lazy cache for transforms and eigenvalues."""
+        T, T_inv = self._get_transform_operators()
+        eig_op = self._get_nonzero_eigenvalues()
+        
+        # Handle Pseudo-inverse: 0 -> inf so 1/inf = 0
+        eigs = eig_op.diagonal.as_array()
+        eigs[eigs == 0] = np.inf 
+        
+        return T, T_inv, eig_op
+    
+    def _get_transform_operators(self):
+        """ Get the orthogonal transform operators T and T_adjoint. """
+        bnd_cond = self.operator.bnd_cond
+        if isinstance(bnd_cond, str):
+            bnd_cond = bnd_cond.lower()
+
+        if bnd_cond in [0, 'neumann']:
+            norm = 'ortho' 
+            T = lambda x: dctn(x, norm=norm)
+            T_inv = lambda x: idctn(x, norm=norm)
+        elif bnd_cond in [1, 'periodic']:
+            T = lambda x: fftn(x)
+            T_inv = lambda x: ifftn(x)
+        else:
+            raise NotImplementedError("Boundary condition not supported.")
+
+        return T, T_inv
+    
+    def _get_nonzero_eigenvalues(self):
+        """ Compute the eigenvalues of G*G and return as a DiagonalOperator.
+        Multidimensional eigenvalues are summed together using vectorized operations.
+        """
+        bnd_cond = str(self.operator.bnd_cond).lower()
+        geom = self.domain_geometry()
+        shape = geom.shape
+        spacing = geom.spacing
+        labels = geom.dimension_labels
+        
+        factor = 2.0 if bnd_cond in ['0', 'neumann'] else 1.0
+        grids = np.ogrid[tuple(slice(0, N) for N in shape)]
+        
+        # Determine active dimensions for gradient based on correlation
+        active_mask = [
+            not (self.correlation == "Space" and label == 'channel') and N > 1
+            for N, label in zip(shape, labels)
+        ]
+
+        # Sum eigenvalues across active dimensions
+        eigenvalues_array = sum(
+            (4.0 * (np.sin(np.pi * g / (factor * N))**2) / (h**2))
+            for g, N, h, active in zip(grids, shape, spacing, active_mask)
+            if active
+        )
+
+        if isinstance(eigenvalues_array, (int, float)):
+            eigenvalues_array = np.zeros(shape, dtype=getattr(geom, 'dtype', np.float32))
+
+        eig_container = geom.allocate()
+        eig_container.fill(eigenvalues_array)
+        return DiagonalOperator(eig_container)
 
     def calculate_norm(self):
 

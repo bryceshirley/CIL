@@ -482,61 +482,119 @@ class TestGradientOperator(unittest.TestCase):
             Grad.operator.fd = Mock(return_value=-1)
             with self.assertRaises(RuntimeError):
                 Grad.adjoint(res_direct)
-    
+
     def test_inverse(self):
-        config = self.test_backend_configurations[1]
-        M = 3
-        ig = ImageGeometry(M, M)
-        x = ig.allocate('random',seed=100)
+        """ Test the pseudoinverse of the Gradient Operator """
+        for config in self.test_backend_configurations:
+            backend = config.get('backend')
+            
+            for geom in self.list_geometries:
+                for bnd in config.get('bconditions'):
+                    for method in config.get('method'):
+                        for corr in config.get('correlation'):
+                                grad = GradientOperator(geom, bnd_cond=bnd, method=method, 
+                                                    correlation=corr, backend=backend)
 
-        for bnd in config.get('bconditions'):
-            for method in config.get('method'):
-                Grad = GradientOperator(ig,
-                                        bnd_cond = bnd,
-                                        method=method)
+                                u = geom.allocate('random', seed=100)
+                                x = grad.direct(u) 
+                                y = grad.inverse(x)
 
-                # Test inverse reconstruction
-                y = Grad.inverse(x)
-                x_rec = Grad.direct(y)
-                try:
-                    numpy.testing.assert_array_almost_equal(x_rec.array,
-                                                    x.array)
-                except:
-                    self.print_assertion_info(ig,bnd,method)
-                    raise
+                                # Determine the axes for mean removal
+                                u_arr = u.as_array()
+                                y_arr = y.as_array()
+
+                                if grad.correlation == "Space" and getattr(geom, 'channels', 1) > 1:
+                                    # Find the index of the channel dimension
+                                    channel_axis = geom.dimension_labels.index('channel')
+                                    # All axes EXCEPT the channel axis are spatial
+                                    spatial_axes = tuple(i for i in range(u_arr.ndim) if i != channel_axis)
+                                    
+                                    u_zero_mean = u_arr - numpy.mean(u_arr, axis=spatial_axes, keepdims=True)
+                                    y_zero_mean = y_arr - numpy.mean(y_arr, axis=spatial_axes, keepdims=True)
+                                else:
+                                    # Global mean for SpaceChannels or single channel data
+                                    u_zero_mean = u_arr - numpy.mean(u_arr)
+                                    y_zero_mean = y_arr - numpy.mean(y_arr)
+
+                                try:
+                                    numpy.testing.assert_allclose(u_zero_mean, y_zero_mean, atol=1e-4)
+                                except:
+                                    self.print_assertion_info(geom, bnd,backend, method, corr)
+                                    raise
+
+                                T, _, eig_op = grad._spectral_data
+                                eigs = eig_op.diagonal.as_array()
+
+                                mask = numpy.isfinite(eigs)
+                                
+                                u_freq = T(u.as_array())
+                                y_freq = T(y.as_array())
+
+                                # Compare reconstructed frequencies. 
+                                try:
+                                    numpy.testing.assert_allclose(u_freq[mask], y_freq[mask], atol=5e-4, rtol=1e-3)
+                                    numpy.testing.assert_allclose(y_freq[~mask], 0, atol=1e-4)
+                                except:
+                                    self.print_assertion_info(geom, bnd,backend, method, corr)
+                                    raise
     
     def test_inverse_adjoint(self):
-        config = self.test_backend_configurations[1]
-        M = 4
-        ig = ImageGeometry(M, M)
-        x = ig.allocate('random',seed=200)
+        """
+        Test the pseudoinverse adjoint of the Gradient Operator
+        """
 
-        for bnd in config.get('bconditions'):
-            for method in config.get('method'):
-                Grad = GradientOperator(ig,
-                                        bnd_cond = bnd,
-                                        method=method)
-                
-                # Adjoint for the inverse: <D^-1 v, u> == <v, (D^-1)* u>
-                u = Grad.domain_geometry().allocate('random', seed=5)
-                v = Grad.range_geometry().allocate('random', seed=6)
-                dot1 = Grad.inverse(v).dot(u)
-                dot2 = v.dot(Grad.inverse_adjoint(u))
+        for config in self.test_backend_configurations:
+            backend = config.get('backend')
+            
+            for geom in self.list_geometries:
+                for bnd in config.get('bconditions'):
+                    for method in config.get('method'):
+                        for corr in config.get('correlation'):
+                            
+                            grad = GradientOperator(geom, bnd_cond=bnd, method=method, 
+                                                    correlation=corr, backend=backend)
+                            
+                            # 1. Adjoint Dot Product Test: <G_inv v, u> == <v, G_inv_adj u>
+                            # u is Image space, v is Gradient space
+                            u = grad.domain_geometry().allocate('random', seed=5)
+                            v = grad.range_geometry().allocate('random', seed=6)
+                            
+                            dot1 = grad.inverse(v).dot(u)
+                            dot2 = v.dot(grad.inverse_adjoint(u))
 
-                try:
-                    self.assertAlmostEqual(dot1/u.norm(), dot2/u.norm(), places=5)
-                except:
-                    self.print_assertion_info(ig,bnd,method)
-                    raise
+                            try:
+                                # Normalize by norm to check relative precision
+                                numpy.testing.assert_allclose(dot1/u.norm(), dot2/u.norm(), atol=1e-4, rtol=1e-4)
+                            except:
+                                self.print_assertion_info(geom, bnd,backend, method, corr)
+                                raise
 
-                # Test inverse adjoint reconstruction
-                y = Grad.inverse_adjoint(x)
-                x_rec = Grad.adjoint(y)
-                try:
-                    numpy.testing.assert_array_almost_equal(x_rec.array,
-                                                    x.array)
-                except:
-                    self.print_assertion_info(ig,bnd,method)
-                    raise
-    
+                            # 2. Reconstruction Test: G_adj (G_inv_adj u) = u (minus mean)
+                            u = geom.allocate('random', seed=100)
+                            x = grad.inverse_adjoint(u) 
+                            y = grad.adjoint(x)
+
+                            # Determine the axes for mean removal
+                            u_arr = u.as_array()
+                            y_arr = y.as_array()
+
+                            if grad.correlation == "Space" and getattr(geom, 'channels', 1) > 1:
+                                # Find the index of the channel dimension
+                                channel_axis = geom.dimension_labels.index('channel')
+                                # All axes EXCEPT the channel axis are spatial
+                                spatial_axes = tuple(i for i in range(u_arr.ndim) if i != channel_axis)
+                                
+                                u_zero_mean = u_arr - numpy.mean(u_arr, axis=spatial_axes, keepdims=True)
+                                y_zero_mean = y_arr - numpy.mean(y_arr, axis=spatial_axes, keepdims=True)
+                            else:
+                                # Global mean for SpaceChannels or single channel data
+                                u_zero_mean = u_arr - numpy.mean(u_arr)
+                                y_zero_mean = y_arr - numpy.mean(y_arr)
+
+                            try:
+                                numpy.testing.assert_allclose(u_zero_mean, y_zero_mean, atol=1e-4)
+                            except:
+                                self.print_assertion_info(geom, bnd,backend, method, corr)
+                                raise
+                                        
 
