@@ -2351,6 +2351,55 @@ class TestGLSQR(CCPiTestClass):
         self.assertAlmostEqual(dot1, dot2, places=4, 
                                msg="K and K* are not consistent adjoints!")
     
+    def test_K_operator_adjoint_consistency_gradient(self):
+        """Verify that _apply_K and _apply_K_adjoint are true adjoints
+        using the GradientOperator (Block operator) with L2."""
+        
+        # 1. Setup Geometries and Operators
+        N, M = 32, 32
+        ig = ImageGeometry(M, N)
+        
+        # Forward operator (A)
+        # We use a simple Identity for A to isolate the Gradient (L) logic
+        Aop = IdentityOperator(ig)
+        
+        # Structural operator (L_struct) - This is our Block Operator
+        go = GradientOperator(ig) 
+        
+        # 2. Initialize GLSQR
+        # Data is in range of A (Image space)
+        data = Aop.range_geometry().allocate('random', seed=1)
+        
+        glsqr = GLSQR(operator=Aop, data=data, struct_operator=go, reg_norm_type="L2")
+        
+        # 3. Identify the correct spaces
+        # Data space: Range of A
+        # Weighted space: Range of Gradient (Block space)
+        weighted_space_geom = go.range_geometry() # This is a BlockGeometry
+        data_space_geom = Aop.range_geometry()    # This is an ImageGeometry
+
+        # 4. Create random vectors
+        # v lives in Weighted space (Block space)
+        v = weighted_space_geom.allocate('random', seed=2)
+        # u lives in Data space (Image space)
+        u = data_space_geom.allocate('random', seed=3)
+
+        # 5. Apply K: Kv = A * L_inv * v
+        Kv = data_space_geom.allocate(0)
+        glsqr._apply_K(v, out=Kv)
+
+        # 6. Apply K*: KstarU = L_inv_adj * A_adj * u
+        KstarU = weighted_space_geom.allocate(0)
+        glsqr._apply_K_adjoint(u, out=KstarU)
+
+        # 7. Check Adjoint Dot Product Identity: <Kv, u> == <v, K*u>
+        dot1 = Kv.dot(u)
+        dot2 = v.dot(KstarU)
+
+        # Note: We normalize by the dot product magnitude to check relative precision
+        self.assertAlmostEqual(dot1/dot1, dot2/dot1, places=4, 
+                               msg="K and K* are not consistent adjoints for Block Operators!")
+    
     def test_glsqr_l2_wavelet_equivalence(self):
         """
         Test that L2 regularization in the image domain is equivalent 
