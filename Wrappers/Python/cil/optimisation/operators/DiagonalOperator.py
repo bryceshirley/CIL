@@ -63,19 +63,29 @@ class DiagonalOperator(LinearOperator):
 
     def inverse(self, x, out=None):
         "Returns :math:`D^{-1}\circ x`"
+        inv_diag = (1 / self.diagonal)
+
+        arr = inv_diag.as_array()
+        arr[~np.isfinite(arr)] = 0
+        inv_diag.fill(arr)
+
         if out is None:
-            return (1 / self.diagonal) * x
+            return inv_diag.multiply(x)
         else:
-            (1 / self.diagonal).multiply(x, out=out)
+            inv_diag.multiply(x, out=out)
         return out
 
     def inverse_adjoint(self, x, out=None):
         """Returns :math:`(D^*)^{-1} \circ x`"""
         # (D^*)^-1 = conj(D)^-1 = 1 / conj(D)
         inv_conj_diag = (1 / self.diagonal.conjugate())
+
+        arr = inv_conj_diag.as_array()
+        arr[~np.isfinite(arr)] = 0
+        inv_conj_diag.fill(arr)
         
         if out is None:
-            return inv_conj_diag * x
+            return inv_conj_diag.multiply(x)
         else:
             inv_conj_diag.multiply(x, out=out)
             return out
