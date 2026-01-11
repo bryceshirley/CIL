@@ -116,18 +116,12 @@ class GLSQR(Algorithm):
         Type of regularisation norm ('L1' or 'L2'). Default is 'L2'.
     weight_operator : Operator, optional
         Regularisation operator :math:`L`. If not provided, defaults to IdentityOperator.
-    maxoutit : int, optional
-            Maximum number of outer iterations. Default is the size of the domain.
-    maxinit : int, optional
-        Maximum number of inner iterations for L1 regularisation.
     tau : float, optional
         Small positive parameter for L1 regularisation.
     atol : float, optional
         Absolute tolerance for stopping criteria for L1 regularisation.
-    btol : float, optional
-        Relative tolerance for stopping criteria for L1 regularisation.
-    xtol : float, optional
-        Solution change tolerance for stopping criteria for L1 regularisation.
+    ne_rtol : float, optional
+        Estimated residual tolerance for stopping criteria for L1 regularisation.
 
     Reference
     ---------
@@ -142,14 +136,12 @@ class GLSQR(Algorithm):
         reg_norm_type: str = "L2",
         struct_operator=None,
         regalpha: float = 0.0,
-        maxoutit: int = 50,
-        maxinit: int = 20,
+        ne_rtol: float = 0.1, # Relative tolerance for normal equations for IRLS inner loop
         tau: float = 1.0,
         tau_factor: float = 0.1,
-        atol: float = 1e-3,
-        btol: float = 1e-3,
-        xtol: float = 1e-3,
         reinitialize_GKB: bool = True,
+        max_inner_iterations: int = 50, # Default maximum inner iterations for IRLS
+        store_subspace_history: bool = False, 
         **kwargs,
     ):
         """
@@ -170,18 +162,19 @@ class GLSQR(Algorithm):
         weight_operator : Operator, optional
             Tikhonov weight operator :math:`L`. The operator must have an inverse or pseudo-inverse
             method implemented.
-        maxoutit : int, optional
-            Maximum number of outer iterations. Default is the size of the domain.
-        maxinit : int, optional
-            Maximum number of inner iterations for L1 regularisation.
         tau : float, optional
             Small positive parameter for L1 regularisation.
-        atol : float, optional
-            Absolute tolerance for stopping criteria for L1 regularisation.
-        btol : float, optional
-            Relative tolerance for stopping criteria for L1 regularisation.
-        xtol : float, optional
-            Solution change tolerance for stopping criteria for L1 regularisation.
+        tau_factor : float, optional
+            Factor to decrease tau at each outer iteration for L1 regularisation.
+        ne_rtol : float, optional
+            Estimated residual tolerance for stopping criteria for L1 regularisation.
+        reinitialize_GKB : bool, optional
+            Whether to reinitialize the Golub-Kahan Bidiagonalisation (GKB) at
+            each outer iteration for L1 regularisation.
+        max_inner_iterations : int, optional
+            Maximum number of inner iterations for L1 regularisation.
+        store_subspace_history : bool, optional
+            Whether to store the history of alpha and beta scalars for projected operator construction.
         """
         super().__init__(**kwargs)
 
@@ -190,16 +183,19 @@ class GLSQR(Algorithm):
 
         self.regalpha = regalpha
         self.reg_norm_type = reg_norm_type
-        self.maxoutit = maxoutit
 
         # L1-norm specific parameters
-        self.maxinit = maxinit
         self.tau = tau
         self.tau_factor = tau_factor
-        self.atol = atol
-        self.btol = btol
-        self.xtol = xtol
         self.reinitialize_GKB = reinitialize_GKB
+
+        # Inner loop parameters for IRLS
+        self.ne_rtol = ne_rtol
+        self.max_inner_iterations = max_inner_iterations
+        self.total_gkb_iterations = 0 # Total GKB iterations across inner loops
+
+        # Store history of alpha and beta for projected operator construction
+        self.store_subspace_history = store_subspace_history
 
         # Initialise the algorithm
         self.set_up(
@@ -213,6 +209,20 @@ class GLSQR(Algorithm):
     def set_up(self, initial, operator, data, struct_operator, **kwargs):
         """
         Set up the GLSQR algorithm with the problem definition.
+
+        Unique Geometries
+        - Solution domain (u): domain_geom_solution
+        - Data range (b): range_geom_data
+        - Structure space (\bar{x}): range_geom_struct
+
+        Operator        | Domain          | Range           | Notes
+        --------------- | --------------- | --------------- | ----------------------------------------------------
+        A               | Domain (u)      | Range (A)       | The forward physics model.
+        L_struct        | Domain (u)      | Range (L)       | Structural part (e.g., Gradient, Wavelets).
+        L_norm          | Range (L)       | Range (L)       | Square/Diagonal; operates on L_struct(x).
+        L (Combined)    | Domain (u)      | Range (L)       | Defined as L = L_norm * L_struct.
+        L_inv           | Range (L)       | Domain (u)      | Maps regularized variable \bar{x} back to u.
+        K = A * L_inv   | Range (L)       | Range (A)       | The Effective Operator used within GKB/GLSQR steps.
 
         Parameters
         ----------
@@ -232,44 +242,49 @@ class GLSQR(Algorithm):
         self.data = data
         self.initial = initial  # 1 domain
 
-        # 2. Problem sizes
-        self.domain_size = self.initial.size
-        self.data_size = self.data.size
+        # 2. Identify Geometries
+        self.domain_geom_solution = self.operator.domain_geometry()  # Space of u
+        self.range_geom_data = self.operator.range_geometry()  # Space of b
 
-        # 3. Identify Geometries
-        # domain_geom: Image Space (u)
-        # range_geom: Data Space (b)
-        domain_geom = self.operator.domain_geometry()
-        # Use the range geometry of the structural operator for the weighted space vector x
-        struct_range_geom = struct_operator.range_geometry() 
-        range_geom = self.operator.range_geometry()
-
-        # 3. Define the regularisation operator (L = L_{\text{norm}} L_{\text{struct}})
+        # 3. Define the regularisation operator (K = A L,  L = L_{\text{norm}} L_{\text{struct}})
+        # If L1 is used an additional space is allocated for the L1 weights
+        # That would be in the range of range_geom_struct
         self.glsqr_operator = GLSQROperator(
-            domain_geometry=domain_geom,
+            domain_geometry=self.domain_geom_solution,
             operator=operator, # Forward operator A
             tau=self.tau,
             tau_factor=self.tau_factor,
             struct_operator=struct_operator,
             norm_type=self.reg_norm_type,
-            domain_size=self.domain_size,
-            adapt_tau=True,
-        )
+        ) 
+        # Use the range geometry of the structural operator for the weighted space vector x
+        self.range_geom_struct = self.glsqr_operator.range_geometry()
+
         if self.reg_norm_type.upper() == "L1":
             self.glsqr_operator.update_weights(self.initial, domain="image")
 
-        # 4. Allocate variables for iterations
-        self.x = struct_range_geom.allocate(0)  # 2 domain
-        self.u = range_geom.allocate(0)  # 1 range
-        self.v = domain_geom.allocate(0)  # 3 domain
-        self.d = domain_geom.allocate(0)  # 4 domain
-        self.tmp_range = range_geom.allocate(0)  # 2 range
-        self.tmp_domain = domain_geom.allocate(0)  # 5 domain
+        # 4. Problem sizes (using safe shape product)
+        self.domain_size = int(np.prod(self.domain_geom_solution.shape))
+        self.data_size = int(np.prod(self.range_geom_data.shape))
 
-        # TODO: Make glsqr_operator only store _null_correction_vector if the storage space is given here
-        # otherwise compute on the fly (less efficient in time as recomputed each time with an application of A and A^T).
+        # 5. Allocate variables in their correct spaces
+        # Structure Space (Vector x, Search directions v, d)
+        self.x = self.range_geom_struct.allocate(0)
+        self.v = self.range_geom_struct.allocate(0)
+        self.d = self.range_geom_struct.allocate(0)
+        
+        # Vector u lives in Data Space (Residuals u)
+        self.u = self.range_geom_data.allocate(0)
+
+        # Temporary Buffers
+        self.tmp_range_data = self.range_geom_data.allocate(0) 
+        self.tmp_range_struct = self.range_geom_struct.allocate(0)
+        self.tmp_domain = self.domain_geom_solution.allocate(0)
+
+        # Handle Gradient Operator special case
         if isinstance(self.glsqr_operator.L_struct, GradientOperator):
-            self.glsqr_operator._null_correction_vector = struct_operator.domain_geometry().allocate(0) # Add null-space correction vector storage
+             # Null correction lives in Solution Space
+            self.glsqr_operator._null_correction_vector = self.domain_geom_solution.allocate(0)
 
         # Initialise Golub-Kahan bidiagonalisation (GKB)
         self._initialize_GKB()
@@ -298,24 +313,27 @@ class GLSQR(Algorithm):
             self._initialize_GKB()  # Maps initial to weighted space
 
         # Inner Loop
-        for inner_it in range(self.maxinit):
+        for inner_it in range(self.max_inner_iterations):
             self._GKB_step()
 
             if self._check_inner_stop(inner_it):
                 break
 
+        self.total_gkb_iterations += inner_it + 1
+
         # Update weights for next outer iteration
         self.glsqr_operator.update_weights(self.x, domain="range")
 
-    def _bidiag_update(self, input_vec, target_vec, op_func, shift_vec, scalar, buffer1,
-                       buffer2):
+    def _bidiag_update(self, input_vec, target_vec, op_func, shift_vec, scalar, buffer1, buffer2):
         """
-        Performs the GKB update step:
-        target = Op(input_vec) - scalar * shift_vec
+        Performs: target = (Op(input) - scalar * shift) / norm
+        buffer1: Used to store Op(input). Must match Range of Op.
+        buffer2: Used as internal workspace for Op (e.g. Solution Space for L_inv).
         """
+        # Apply Operator: buffer1 = Op(input_vec) using buffer2 as workspace
         op_func(input_vec, buffer1, buffer2)
 
-        # Combine (1.0 * buffer) + (-scalar * shift_vec) -> target_vec
+        # Combine: buffer1 - scalar * shift_vec -> target_vec
         buffer1.sapyb(1.0, shift_vec, -scalar, out=target_vec)
 
         norm = target_vec.norm()
@@ -329,19 +347,23 @@ class GLSQR(Algorithm):
 
         Initialise the GKB process for GLSQR with weighting.
         """
-        # 1. Map initial guess to weighted space
+        # 1. Map initial guess to structure space
         self.glsqr_operator.direct(self.initial, out=self.x)
 
         # 2. u = (b - Kx) / beta, beta is norm of numerator
-        # _apply_K outputs to Range, so use self.tmp_range
+        # K maps structure -> Data. Kx requires tmp_domain for L_inv application.
+        # We use tmp_range_data for the output of Kx before subtracting b
         self.beta = self._bidiag_update(
-            self.x, self.u, self.glsqr_operator.direct_A_L_inv, self.data, -1.0, self.tmp_range, self.tmp_domain
+            self.x, self.u, self.glsqr_operator.direct_A_L_inv, self.data, -1.0, 
+            self.tmp_range_data, self.tmp_domain
         )
 
         # 3. v = (K*u - 0) / alpha, alpha is norm of numerator
-        # _apply_K_adjoint outputs to Domain, so use self.tmp_domain
+        # K* maps Data -> structure.
+        # We use tmp_range_struct for the output of K*u
         self.alpha = self._bidiag_update(
-            self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, 0.0, self.tmp_domain, self.tmp_range
+            self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, 0.0, 
+            self.tmp_range_struct, self.tmp_domain
         )
 
         # 4. Initialize scalars and search direction
@@ -351,18 +373,23 @@ class GLSQR(Algorithm):
         self.res2 = 0.0
         self.d = self.v
 
+        if self.store_subspace_history:
+            self._initialize_subspace_history()
+
     def _GKB_step(self):
         """single iteration of GKB"""
-        # Update u: u = (Kv - alpha*u) / beta, beta is norm of numerator
-        # _apply_K outputs to Range, so use self.tmp_range
+        # 1. Update u: u = (Kv - alpha*u) / beta
+        # Input v is in Structure Space. Output u is in Data Space.
         self.beta = self._bidiag_update(
-            self.v, self.u, self.glsqr_operator.direct_A_L_inv, self.u, self.alpha, self.tmp_range
+            self.v, self.u, self.glsqr_operator.direct_A_L_inv, self.u, self.alpha, 
+            self.tmp_range_data, self.tmp_domain
         )
 
-        # Update v: v = (K*u - beta*v) / alpha, alpha is norm of numerator
-        # _apply_K_adjoint outputs to Domain, so use self.tmp_domain
+        # 2. Update v: v = (K*u - beta*v) / alpha
+        # Input u is in Data Space. Output v is in Structure Space.
         self.alpha = self._bidiag_update(
-            self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, self.beta, self.tmp_domain
+            self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, self.beta, 
+            self.tmp_range_struct, self.tmp_domain
         )
 
         # 3. Scalar Updates
@@ -374,20 +401,40 @@ class GLSQR(Algorithm):
         c, s = rhobar1 / rho, self.beta / rho
 
         # Store coefficients for stopping criteria and updates
-        self.step_coeff = (c * phibar_temp) / rho
-        self.d_update_coeff = (s * self.alpha) / rho
+        step_coeff = (c * phibar_temp) / rho
+        d_update_coeff = (s * self.alpha) / rho
 
         # Update class state for next iteration
         self.rhobar = -c * self.alpha
         self.phibar = s * phibar_temp
         self.res2 += psi**2
+        
+        # Update residual norm estimate (normr)
+        self.res2 += psi**2
         self.normr = np.hypot(self.phibar, np.sqrt(self.res2))
 
-        # 4. Vector Updates (Using stored coefficients)
-        # x = x + step_coeff * d
-        self.x.sapyb(1.0, self.d, self.step_coeff, out=self.x)
-        # d = v - d_update_coeff * d
-        self.v.sapyb(1.0, self.d, -self.d_update_coeff, out=self.d)
+        # 4. Vector Updates
+        # Update solution: x = x + step_coeff * d
+        self.x.sapyb(1.0, self.d, step_coeff, out=self.x)
+        
+        # Update search direction: d = v - d_update_coeff * d
+        # We use self.v as the base and modify self.d in-place
+        self.v.sapyb(1.0, self.d, -d_update_coeff, out=self.d)
+
+        if self.store_subspace_history:
+            self._update_subspace_history()
+
+    def _initialize_subspace_history(self):
+        """Initialise history of alpha and beta."""
+        self.alphavec = [self.alpha]
+        self.betavec = [self.beta]
+        self.k = 1  # Iteration counter for hybrid LSQR
+    
+    def _update_subspace_history(self):
+        """Store history of alpha and beta."""
+        self.alphavec.append(self.alpha)
+        self.betavec.append(self.beta)
+        self.k += 1
 
     def update_objective(self):
         """
@@ -398,36 +445,24 @@ class GLSQR(Algorithm):
         self.loss.append(self.normr**2)
 
     def _check_inner_stop(self, inner_it):
-        """Check inner stopping criteria for IRLS"""
-        # Current image norm
-        xnorm = self.x.norm()
-
-        # Tolerances scaled by initial residual beta0
-        rel_res_tol = self.atol * self.beta0
-        proj_grad_tol = self.btol * self.beta0
-        step_tol = self.xtol * (xnorm + 1.0)
-
-        # Calculate step norm: ||step_coeff * d||
-        step_norm = abs(self.step_coeff) * self.d.norm()
+        """Check inner stopping criteria for IRLS using Normal Equations Relative Tolerance."""
+        
+        # In LSQR, the norm of the gradient of the normal equations ||A^T r|| 
+        # is estimated by alpha * abs(phibar). 
+        # This is the standard 'ne_rtol' check for the inner solve.
+        current_grad_norm = self.alpha * abs(self.phibar)
+        
+        # Target scaled by the initial residual beta0
+        grad_tol = self.ne_rtol * self.beta0
 
         log.debug(
-            "Inner It %d: normr-tol: %.2e, phibar-tol: %.2e, step-tol: %.2e",
+            "Inner It %d: grad_norm-tol: %.2e",
             inner_it,
-            (self.normr - rel_res_tol),
-            (abs(self.phibar) - proj_grad_tol),
-            (step_norm - step_tol),
+            (current_grad_norm - grad_tol),
         )
 
-        if self.normr <= rel_res_tol:
-            log.debug("Stopping Criteria: relative residual.")
-            return True
-
-        if abs(self.phibar) <= proj_grad_tol:
-            log.debug("Stopping Criteria: projected gradient.")
-            return True
-
-        if step_norm <= step_tol:
-            log.debug("Stopping Criteria: small relative step.")
+        if current_grad_norm <= grad_tol:
+            log.debug("Stopping Criteria: Normal Equations Relative Tolerance (ne_rtol) met.")
             return True
 
         return False
@@ -444,4 +479,37 @@ class GLSQR(Algorithm):
 
         """
         # Map back to original space
-        return self.glsqr_operator.inverse(self.x, tmp_range=self.tmp_range, add_nullspace_correction=True)
+        return self.glsqr_operator.inverse(self.x, tmp_range=self.tmp_range_struct, add_nullspace_correction=True)
+
+    @property
+    def ne_rtol(self):
+        """Relative tolerance for the Normal Equations inner loop."""
+        return self._ne_rtol
+
+    @ne_rtol.setter
+    def ne_rtol(self, value):
+        if value < 0:
+            raise ValueError("ne_rtol must be non-negative.")
+        self._ne_rtol = value
+
+    @property
+    def tau(self):
+        """Current smoothing parameter for IRLS weights."""
+        return self._tau
+
+    @tau.setter
+    def tau(self, value):
+        if value <= 0:
+            raise ValueError("tau must be strictly positive.")
+        self._tau = value
+
+    @property
+    def tau_factor(self):
+        """Factor used to decrease tau during iterations."""
+        return self._tau_factor
+
+    @tau_factor.setter
+    def tau_factor(self, value):
+        if not (0 < value <= 1):
+            raise ValueError("tau_factor must be in the range (0, 1].")
+        self._tau_factor = value
