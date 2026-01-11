@@ -75,14 +75,11 @@ class HybridGLSQR(GLSQR):
         reg_norm_type: str = "L2",
         struct_operator=None,
         regalpha: float = 0.0,
-        maxoutit: int = 50,
-        maxinit: int = 20,
+        ne_rtol: float = 0.1, # Relative tolerance for normal equations for IRLS inner loop
         tau: float = 1.0,
         tau_factor: float = 0.1,
-        atol: float = 1e-3,
-        btol: float = 1e-3,
-        xtol: float = 1e-3,
         reinitialize_GKB: bool = True,
+        max_inner_iterations: int = 50, # Default maximum inner iterations for IRLS
         hybrid_reg_rule=None,
         **kwargs,
     ):
@@ -121,20 +118,21 @@ class HybridGLSQR(GLSQR):
             Instance of a hybrid regularisation parameter selection rule. If None, defaults to UpdateRegGCV.
         """
         # Initialise parent GLSQR class
-        super().__init__(operator=operator, data=data, initial=initial,
-                         reg_norm_type=reg_norm_type,
-                         struct_operator=struct_operator,
-                         regalpha=regalpha,
-                         maxinit=maxinit,
-                         tau=tau,
-                         tau_factor=tau_factor,
-                         atol=atol,
-                         btol=btol,
-                         xtol=xtol,
-                         maxoutit=maxoutit,
-                         reinitialize_GKB = reinitialize_GKB,
+        super().__init__(operator=operator,
+                        data=data,
+                        initial=initial,
+                        reg_norm_type=reg_norm_type,
+                        struct_operator=struct_operator,
+                        regalpha=regalpha,
+                        ne_rtol=ne_rtol,
+                        tau=tau,
+                        tau_factor=tau_factor,
+                        reinitialize_GKB=reinitialize_GKB,
+                        max_inner_iterations=max_inner_iterations,
+                        store_subspace_history=True, # Subspace history needed for hybrid
                          **kwargs)
-        
+        if self.store_subspace_history is False:
+            raise ValueError("HybridGLSQR requires store_subspace_history=True")
         
         # Set up hybrid regularisation parameter selection rule
         self.setup_hybridLSQR(hybrid_reg_rule=hybrid_reg_rule)
@@ -142,12 +140,6 @@ class HybridGLSQR(GLSQR):
     
     def setup_hybridLSQR(self,hybrid_reg_rule=None):
         """Set up the regularisation parameter selection rule."""
-
-        # Initialise storage for alpha and beta history
-        self.alphavec = [self.alpha]
-        self.betavec = [self.beta]
-
-        self.k = 1  # Iteration counter for hybrid LSQR
 
         # Select rule instance
         if hybrid_reg_rule is not None:
@@ -174,20 +166,13 @@ class HybridGLSQR(GLSQR):
         # 4. Fill sub-diagonal: beta_2 to beta_k+1
         np.fill_diagonal(Bk[1:, :], self.betavec[1:self.k+1])
         return Bk
-    
-    def _append_scalar_history(self):
-        """Store history of alpha and beta."""
-        self.alphavec.append(self.alpha)
-        self.betavec.append(self.beta)
-        self.k += 1
 
     def update(self):
         """single iteration"""
-        # Perform LSQR iteration # TODO: L2: doesn't need to update x here.
+        # Perform LSQR iteration
         self._perform_iteration()
 
         # Build Bk
-        self._append_scalar_history()
         Bk = self._build_projected_operator()
 
         # Select regularisation parameter

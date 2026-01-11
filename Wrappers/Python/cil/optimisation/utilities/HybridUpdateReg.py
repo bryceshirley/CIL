@@ -722,7 +722,7 @@ class UpdateRegDiscrep(UpdateRegBase):
         ax1.grid(True, which="both", linestyle="--", alpha=0.5)
 
         # --- Subplot 2: Residual Norm vs Noise Level ---
-        ax2.semilogx(
+        ax2.loglog(
             regalpha_grid, res_norm_grid, label="Residual Norm $\|r_\\alpha\|_2$"
         )
         # Horizontal line for noise level estimate
@@ -732,7 +732,7 @@ class UpdateRegDiscrep(UpdateRegBase):
             linestyle="--",
             label=rf"Noise Level $\eta={self.noise_level_estimate:.2e}$",
         )
-        ax2.semilogx(regalpha_grid[reg_idx], res_norm_grid[reg_idx], "ro", markersize=8)
+        ax2.loglog(regalpha_grid[reg_idx], res_norm_grid[reg_idx], "ro", markersize=8)
         ax2.axvline(self.regalpha, color="gray", linestyle=":", alpha=0.5)
         ax2.set_xlabel("Regularisation parameter ($\\alpha$)")
         ax2.set_ylabel("$\|r_\\alpha\|_2$")
@@ -1222,7 +1222,7 @@ class UpdateRegLcurve(UpdateRegBase, grid_search_mixin):
         filepath: Optional[str] = None,
     ):
         r"""
-        Plot the discrepancy function over a range of regularization parameters.
+        Plot the L-curve function over a range of regularization parameters.
 
         Args:
             regalpha_limits (Optional[Tuple[float, float]]):
