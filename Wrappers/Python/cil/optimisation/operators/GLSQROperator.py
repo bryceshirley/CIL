@@ -21,6 +21,7 @@ from cil.optimisation.operators import (
     LinearOperator,
     DiagonalOperator,
     IdentityOperator,
+    GradientOperator
 )
 import warnings
 import logging
@@ -29,7 +30,7 @@ log = logging.getLogger(__name__)
 
 
 class GLSQROperator(LinearOperator):
-    r"""`GLSQROperator`: :math:`\tilde{L}`
+    r"""`GLSQROperator`: :math:`L`
 
                    :math:`X` : domain
                    :math:`Y` : range
@@ -39,7 +40,7 @@ class GLSQROperator(LinearOperator):
     structures and norms.
 
     .. math::
-        \tilde{L}(x) = L_{\text{norm}}(L_{\text{struct}}(x))
+        L(x) = L_{\text{norm}}(L_{\text{struct}}(x))
 
     where :math:`L_{\text{norm}}` defines the norm type (L1 or L2) and
     :math:`L_{\text{struct}}` defines the structural properties of the regularisation
@@ -68,8 +69,10 @@ class GLSQROperator(LinearOperator):
 
     - **Wavelets:** :math:`L_{\text{struct}}` is a wavelet transform operator.
 
-    - **Finite Differences:** :math:`L_{\text{struct}}` represents finite difference operators
-        for gradient-based regularisation (e.g., Total Variation).
+    - **Gradient:** :math:`L_{\text{struct}}` represents gradient operators
+        for gradient-based regularisation is currently only supported with L2 norm, it 
+        also requires an addtional null-space correction in the inverse operations and
+        storage of precomputed vector for efficient computation.
 
     - **General:** :math:`L_{\text{struct}}` can be any linear operator that captures
         the desired structural properties of the solution.
@@ -84,6 +87,8 @@ class GLSQROperator(LinearOperator):
         range of the operator, default: same as domain
     norm_type: str, optional
         Type of norm for regularisation, options are 'L2' (default) or 'L1'
+    operator: LinearOperator, optional
+        Forward operator :math:`A`. Required for computing certain quantities in the inverse.
     struct_operator: LinearOperator, optional
         Structural operator :math:`L_{\text{struct}}`. If None, IdentityOperator is used.
     tau: float, optional
@@ -100,16 +105,22 @@ class GLSQROperator(LinearOperator):
 
     def __init__(
         self,
+        operator,
         domain_geometry,
         range_geometry=None,
         struct_operator=None,
         norm_type: str = "L2",
+        domain_size: int = None,
         tau: float = 1,
         adapt_tau: bool = True,
         tau_mode: str = "factor",
         tau_factor: float = 0.1,
         tau_min: float = 1e-8,
     ):
+        # Store domain size and operator
+        self.domain_size = domain_size
+        self.operator = operator
+
         # Parameters for IRLS L1 regularisation
         self.tau = tau
         self.adapt_tau = adapt_tau
@@ -160,12 +171,33 @@ class GLSQROperator(LinearOperator):
         else:
             raise ValueError(f"Unknown norm_type '{self.norm_type}'")
 
+        self._null_correction_vector = None  # Cached vector for G_A_dagger
+        self._is_gradient_l2 = (
+            self.norm_type == "L2"
+            and isinstance(self.L_struct, GradientOperator)
+        )
+        if  (self.norm_type == "L1" and isinstance(self.L_struct, GradientOperator)):
+            raise NotImplementedError(
+                "L1 norm with Gradient structural operator is not implemented."
+            )
+
         super(GLSQROperator, self).__init__(
             domain_geometry=domain_geometry, range_geometry=range_geometry
         )
 
+    def direct_A_L_inv(self, x, out, tmp_domain):
+        """Apply effective operator K = A L_inv"""
+        # buffer must be in domain_geometry
+        self.inverse(x, out=tmp_domain, tmp_range=out)
+        return self.operator.direct(tmp_domain, out=out)
+
+    def adjoint_A_L_inv(self, u, out, tmp_domain):
+        """Apply effective adjoint K* = L_inv* A_adj"""
+        self.operator.adjoint(u, out=tmp_domain)
+        return self.inverse_adjoint(tmp_domain, out=out, tmp_range=tmp_domain)
+
     def direct(self, x, out=None):
-        r"""Returns the :math:`\tilde{L}(x) = L_{\text{norm}}(L_{\text{struct}}(x))`
+        r"""Returns the :math:`L(x) = L_{\text{norm}}(L_{\text{struct}}(x))`
 
         Parameters
         ----------
@@ -177,7 +209,7 @@ class GLSQROperator(LinearOperator):
         Returns
         -------
         DataContainer or BlockDataContainer
-            :math:`\tilde{L}(x) = L_{\text{norm}}(L_{\text{struct}}(x))`
+            :math:`L(x) = L_{\text{norm}}(L_{\text{struct}}(x))`
 
         """
         if out is None:
@@ -188,7 +220,7 @@ class GLSQROperator(LinearOperator):
             return self.L_norm.direct(out, out=out)
 
     def adjoint(self, x, out=None):
-        r"""Returns the adjoint :math:`\tilde{L}^*(x)=L_{\text{struct}}^*(L_{\text{norm}}^*(x))`
+        r"""Returns the adjoint :math:`L^*(x)=L_{\text{struct}}^*(L_{\text{norm}}^*(x))`
 
         Parameters
         ----------
@@ -209,9 +241,27 @@ class GLSQROperator(LinearOperator):
         else:
             self.L_norm.adjoint(x, out=out)
             return self.L_struct.adjoint(out, out=out)
+    
+    def _precompute_GA_vectors(self, tmp_domain, tmp_range):
+        """Precomputes the vector v used for G_A_dagger."""
+        # 1. w is the vector of ones (e) or normalized ones. 
+        # The math uses e (ones) for the final subtraction, so let's use ones.
+        tmp_domain.fill(1.0) 
+        
+        # 2. u_temp = A * e
+        self.operator.direct(tmp_domain, out=tmp_range)
+        
+        # 3. norm_sq = ||A * e / sqrt(N)||^2
+        # This simplifies to: (1/N) * ||A * e||^2
+        norm_Aw_sq = (tmp_range.norm()**2) / self.domain_size
+        
+        # 4. v = (A^T * u_temp) / (N * norm_Aw_sq)
+        # Note: the math box shows v = (A^T * u_temp) / ||u_temp/sqrt(N)||^2
+        self.operator.adjoint(tmp_range, out=tmp_domain)
+        self._null_correction_vector = tmp_domain / (self.domain_size * norm_Aw_sq)
 
-    def inverse(self, x, out=None):
-        r"""Returns the inverse :math:`\tilde{L}^{-1}(x)=L_{\text{struct}}^{-1}(L_{\text{norm}}^{-1}(x))`
+    def inverse(self, x, out, tmp_range=None, add_nullspace_correction=False):
+        r"""Returns the inverse :math:`L^{-1}(x)=L_{\text{struct}}^{-1}(L_{\text{norm}}^{-1}(x))`
 
         Parameters
         ----------
@@ -223,17 +273,41 @@ class GLSQROperator(LinearOperator):
         Returns
         -------
         DataContainer or BlockDataContainer
-            :math:`\tilde{L}^{-1}(x)=L_{\text{struct}}^{-1}(L_{\text{norm}}^{-1}(x))`
+            :math:`L^{-1}(x)=L_{\text{struct}}^{-1}(L_{\text{norm}}^{-1}(x))`
+
+            or for gradient L2 norm:
+            :math:`L^{-1}(x) = L_{\text{struct}}^{-1}\left(x - \frac{1}{\|Aw\|^2} A^T A L_{\text{struct}}^{-1}(x)\right)`
+            From 
+            L_A^{\dagger} = (A-(A(I - L^{\dagger}L))^{\dagger}))L^{\dagger}
         """
-        if out is None:
-            temp = self.L_norm.inverse(x)
-            return self.L_struct.inverse(temp)
-        else:
+        if not self._is_gradient_l2:
             self.L_norm.inverse(x, out=out)
             return self.L_struct.inverse(out, out=out)
-    
-    def inverse_adjoint(self, x, out=None):
-        r"""Returns the adjoint of the inverse :math:`\tilde{L}^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
+        
+        # 1. Ensure v and norms are cached
+        if self._null_correction_vector is None:
+            self._precompute_GA_vectors(out, tmp_range)
+
+        # 2. y = G_dagger * x
+        self.L_struct.inverse(x, out=out)
+
+        # 3. s = mean(v^T * y)
+        # In CIL/NumPy: v.dot(y) / N
+        s = self._null_correction_vector.dot(out) / self.domain_size
+
+        # 4. G_A_dagger * x = y - s * e
+        # Since e is the vector of ones, we just subtract the scalar s
+        out.subtract(s, out=out)
+
+        # 5. Null-space correction (if requested)
+        if add_nullspace_correction:
+            mean_out = out.sum() / self.domain_size
+            out.add(mean_out, out=out)
+        
+        return out
+        
+    def inverse_adjoint(self, x, out, tmp_range=None):
+        r"""Returns the adjoint of the inverse :math:`L^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
 
         Parameters
         ----------
@@ -246,14 +320,26 @@ class GLSQROperator(LinearOperator):
         Returns
         -------
         DataContainer or BlockDataContainer
-            :math:`\tilde{L}^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
+            :math:`L^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
         """
-        if out is None:
-            temp = self.L_norm.inverse_adjoint(x)
-            return self.L_struct.inverse_adjoint(temp)
-        else:
+        if not self._is_gradient_l2:
             self.L_norm.inverse_adjoint(x, out=out)
             return self.L_struct.inverse_adjoint(out, out=out)
+
+        # 1. Ensure v is cached
+        if self._null_correction_vector is None:
+            self._precompute_GA_vectors(out, tmp_range)
+
+        # 2. mu = mean(x)
+        mu = x.sum() / self.domain_size
+
+        # 3. x' = x - mu * v
+        x.subtract(self._null_correction_vector * mu, out=out)
+
+        # 4. Result = (G_dagger)^T * x'
+        self.L_struct.inverse_adjoint(out, out=out)
+        
+        return out
 
     def update_weights(self, x: DataContainer, domain: str = "image"):
         """
@@ -347,14 +433,3 @@ class GLSQROperator(LinearOperator):
             log.warning(
                 "Unknown tau_mode '%s'. No adaptation performed.", self.tau_mode
             )
-
-    # Make tau a property
-    @property
-    def tau(self):
-        return self._tau
-
-    @tau.setter
-    def tau(self, value):
-        if value <= 0:
-            raise ValueError("tau must be positive.")
-        self._tau = value

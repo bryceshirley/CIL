@@ -77,7 +77,8 @@ class HybridGLSQR(GLSQR):
         regalpha: float = 0.0,
         maxoutit: int = 50,
         maxinit: int = 20,
-        tau: float = 1e-3,
+        tau: float = 1.0,
+        tau_factor: float = 0.1,
         atol: float = 1e-3,
         btol: float = 1e-3,
         xtol: float = 1e-3,
@@ -126,6 +127,7 @@ class HybridGLSQR(GLSQR):
                          regalpha=regalpha,
                          maxinit=maxinit,
                          tau=tau,
+                         tau_factor=tau_factor,
                          atol=atol,
                          btol=btol,
                          xtol=xtol,
@@ -153,8 +155,8 @@ class HybridGLSQR(GLSQR):
         else:
             self.reg_rule = UpdateRegGCV(
                 tol=1e-3,
-                data_size=self.data.size,
-                domain_size=self.initial.size,
+                data_size=self.data_size,
+                domain_size=self.domain_size,
                 gcv_weight=1.0,
                 adaptive_weight=True,
             )

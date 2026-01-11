@@ -17,7 +17,7 @@
 # CIL Developers and contributers, listed at: https://github.com/TomographicImaging/CIL/blob/master/NOTICE.txt
 from cil.framework import DataContainer
 from cil.optimisation.algorithms import Algorithm
-from cil.optimisation.operators import GLSQROperator
+from cil.optimisation.operators import GLSQROperator, GradientOperator
 import numpy as np
 import logging
 
@@ -41,9 +41,9 @@ class GLSQR(Algorithm):
 
     .. math::
 
-        \min_u \|A u - b\|_2^2 + \alpha^2 \|\tilde{L} u\|_2^2,
+        \min_u \|A u - b\|_2^2 + \alpha^2 \|L u\|_2^2,
 
-    where :math:`\tilde{L}=L_{\text{norm}} L_{\text{struct}}`.
+    where :math:`L=L_{\text{norm}} L_{\text{struct}}`.
 
     Without assumptions on the structure of :math:`L_{\text{struct}}`, this problem is equivalent
     to the standard-form Tikhonov problem (Chung and Gazzola, 2024):
@@ -52,30 +52,30 @@ class GLSQR(Algorithm):
 
         \bar{x}(\alpha)
         = \underset{\bar{x}}{\mathrm{argmin}}
-        \;\|A \tilde{L}_A^{\dagger} \bar{x} - \bar{b}\|_2^2
+        \;\|A L_A^{\dagger} \bar{x} - \bar{b}\|_2^2
         + \alpha^2 \|\bar{x}\|_2^2,
 
     where:
 
-    - :math:`\tilde{L}_A^{\dagger}
-        = \left(I - (A(I - \tilde{L}^\dagger \tilde{L}))^\dagger A\right) \tilde{L}^\dagger`
-    is the :math:`A`-weighted generalised inverse of :math:`\tilde{L}`.
+    - :math:`L_A^{\dagger}
+        = \left(I - (A(I - L^\dagger L))^\dagger A\right) L^\dagger`
+    is the :math:`A`-weighted generalised inverse of :math:`L`.
 
     - The solution to the original problem is recovered via
 
     .. math::
 
-        u(\alpha) = \tilde{L}_A^{\dagger} \bar{x}(\alpha) + u_0^{\tilde{L}},
+        u(\alpha) = L_A^{\dagger} \bar{x}(\alpha) + u_0^{L},
 
-    where :math:`u_0^{\tilde{L}}` is the component of :math:`u` in the null space of :math:`\tilde{L}`.
+    where :math:`u_0^{L}` is the component of :math:`u` in the null space of :math:`L`.
 
     - The modified right-hand side is
 
     .. math::
 
-        \bar{b} = b - u_0^{\tilde{L}}.
+        \bar{b} = b - u_0^{L}.
 
-    The operator :math:`\tilde{L}` is handled via the `GLSQROperator` class.
+    The operator :math:`L` is handled via the `GLSQROperator` class.
 
     The Norm Operator :math:`L_{\text{norm}}`
     ------------------------------------------
@@ -144,7 +144,8 @@ class GLSQR(Algorithm):
         regalpha: float = 0.0,
         maxoutit: int = 50,
         maxinit: int = 20,
-        tau: float = 1e-3,
+        tau: float = 1.0,
+        tau_factor: float = 0.1,
         atol: float = 1e-3,
         btol: float = 1e-3,
         xtol: float = 1e-3,
@@ -194,6 +195,7 @@ class GLSQR(Algorithm):
         # L1-norm specific parameters
         self.maxinit = maxinit
         self.tau = tau
+        self.tau_factor = tau_factor
         self.atol = atol
         self.btol = btol
         self.xtol = xtol
@@ -230,29 +232,44 @@ class GLSQR(Algorithm):
         self.data = data
         self.initial = initial  # 1 domain
 
+        # 2. Problem sizes
+        self.domain_size = self.initial.size
+        self.data_size = self.data.size
+
         # 3. Identify Geometries
         # domain_geom: Image Space (u)
         # range_geom: Data Space (b)
         domain_geom = self.operator.domain_geometry()
+        # Use the range geometry of the structural operator for the weighted space vector x
+        struct_range_geom = struct_operator.range_geometry() 
         range_geom = self.operator.range_geometry()
 
-        # 3. Define the regularisation operator (\tilde{L} = L_{\text{norm}} L_{\text{struct}})
-        self.weight_operator = GLSQROperator(
+        # 3. Define the regularisation operator (L = L_{\text{norm}} L_{\text{struct}})
+        self.glsqr_operator = GLSQROperator(
             domain_geometry=domain_geom,
+            operator=operator, # Forward operator A
+            tau=self.tau,
+            tau_factor=self.tau_factor,
             struct_operator=struct_operator,
             norm_type=self.reg_norm_type,
+            domain_size=self.domain_size,
             adapt_tau=True,
         )
         if self.reg_norm_type.upper() == "L1":
-            self.weight_operator.update_weights(self.initial, domain="image")
+            self.glsqr_operator.update_weights(self.initial, domain="image")
 
         # 4. Allocate variables for iterations
-        self.x = domain_geom.allocate(0)  # 2 domain
+        self.x = struct_range_geom.allocate(0)  # 2 domain
         self.u = range_geom.allocate(0)  # 1 range
         self.v = domain_geom.allocate(0)  # 3 domain
         self.d = domain_geom.allocate(0)  # 4 domain
         self.tmp_range = range_geom.allocate(0)  # 2 range
         self.tmp_domain = domain_geom.allocate(0)  # 5 domain
+
+        # TODO: Make glsqr_operator only store _null_correction_vector if the storage space is given here
+        # otherwise compute on the fly (less efficient in time as recomputed each time with an application of A and A^T).
+        if isinstance(self.glsqr_operator.L_struct, GradientOperator):
+            self.glsqr_operator._null_correction_vector = struct_operator.domain_geometry().allocate(0) # Add null-space correction vector storage
 
         # Initialise Golub-Kahan bidiagonalisation (GKB)
         self._initialize_GKB()
@@ -288,34 +305,23 @@ class GLSQR(Algorithm):
                 break
 
         # Update weights for next outer iteration
-        self.weight_operator.update_weights(self.x, domain="range")
+        self.glsqr_operator.update_weights(self.x, domain="range")
 
-    def _bidiag_update(self, input_vec, target_vec, op_func, shift_vec, scalar, buffer):
+    def _bidiag_update(self, input_vec, target_vec, op_func, shift_vec, scalar, buffer1,
+                       buffer2):
         """
         Performs the GKB update step:
         target = Op(input_vec) - scalar * shift_vec
         """
-        # op_func (K or adjoint K*) writes its result into the provided buffer
-        op_func(input_vec, out=buffer)
+        op_func(input_vec, buffer1, buffer2)
 
         # Combine (1.0 * buffer) + (-scalar * shift_vec) -> target_vec
-        buffer.sapyb(1.0, shift_vec, -scalar, out=target_vec)
+        buffer1.sapyb(1.0, shift_vec, -scalar, out=target_vec)
 
         norm = target_vec.norm()
         if norm > 0:
             target_vec.divide(norm, out=target_vec)
         return norm
-
-    def _apply_K(self, x, out):
-        """Apply effective operator K = A * L_inv"""
-        # buffer must be in domain_geometry
-        self.weight_operator.inverse(x, out=self.tmp_domain)
-        return self.operator.direct(self.tmp_domain, out=out)
-
-    def _apply_K_adjoint(self, u, out):
-        """Apply effective adjoint K* = L_inv * A_adj"""
-        self.operator.adjoint(u, out=self.tmp_domain)
-        return self.weight_operator.inverse_adjoint(self.tmp_domain, out=out)
 
     def _initialize_GKB(self):
         """
@@ -324,18 +330,18 @@ class GLSQR(Algorithm):
         Initialise the GKB process for GLSQR with weighting.
         """
         # 1. Map initial guess to weighted space
-        self.weight_operator.direct(self.initial, out=self.x)
+        self.glsqr_operator.direct(self.initial, out=self.x)
 
         # 2. u = (b - Kx) / beta, beta is norm of numerator
         # _apply_K outputs to Range, so use self.tmp_range
         self.beta = self._bidiag_update(
-            self.x, self.u, self._apply_K, self.data, -1.0, self.tmp_range
+            self.x, self.u, self.glsqr_operator.direct_A_L_inv, self.data, -1.0, self.tmp_range, self.tmp_domain
         )
 
         # 3. v = (K*u - 0) / alpha, alpha is norm of numerator
         # _apply_K_adjoint outputs to Domain, so use self.tmp_domain
         self.alpha = self._bidiag_update(
-            self.u, self.v, self._apply_K_adjoint, self.v, 0.0, self.tmp_domain
+            self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, 0.0, self.tmp_domain, self.tmp_range
         )
 
         # 4. Initialize scalars and search direction
@@ -343,20 +349,20 @@ class GLSQR(Algorithm):
         self.normr = self.beta
         self.beta0 = self.beta
         self.res2 = 0.0
-        self.d = self.v.copy()
+        self.d = self.v
 
     def _GKB_step(self):
         """single iteration of GKB"""
         # Update u: u = (Kv - alpha*u) / beta, beta is norm of numerator
         # _apply_K outputs to Range, so use self.tmp_range
         self.beta = self._bidiag_update(
-            self.v, self.u, self._apply_K, self.u, self.alpha, self.tmp_range
+            self.v, self.u, self.glsqr_operator.direct_A_L_inv, self.u, self.alpha, self.tmp_range
         )
 
         # Update v: v = (K*u - beta*v) / alpha, alpha is norm of numerator
         # _apply_K_adjoint outputs to Domain, so use self.tmp_domain
         self.alpha = self._bidiag_update(
-            self.u, self.v, self._apply_K_adjoint, self.v, self.beta, self.tmp_domain
+            self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, self.beta, self.tmp_domain
         )
 
         # 3. Scalar Updates
@@ -438,4 +444,4 @@ class GLSQR(Algorithm):
 
         """
         # Map back to original space
-        return self.weight_operator.inverse(self.x)
+        return self.glsqr_operator.inverse(self.x, tmp_range=self.tmp_range, add_nullspace_correction=True)
