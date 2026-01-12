@@ -116,16 +116,10 @@ class GLSQR(Algorithm):
         Type of regularisation norm ('L1' or 'L2'). Default is 'L2'.
     weight_operator : Operator, optional
         Regularisation operator :math:`L`. If not provided, defaults to IdentityOperator.
-    maxoutit : int, optional
-            Maximum number of outer iterations. Default is the size of the domain.
     maxinit : int, optional
         Maximum number of inner iterations for L1 regularisation.
     tau : float, optional
         Small positive parameter for L1 regularisation.
-    atol : float, optional
-        Absolute tolerance for stopping criteria for L1 regularisation.
-    btol : float, optional
-        Relative tolerance for stopping criteria for L1 regularisation.
     xtol : float, optional
         Solution change tolerance for stopping criteria for L1 regularisation.
 
@@ -142,13 +136,11 @@ class GLSQR(Algorithm):
         reg_norm_type: str = "L2",
         struct_operator=None,
         regalpha: float = 0.0,
-        maxoutit: int = 50,
         maxinit: int = 20,
         tau: float = 1e-3,
-        atol: float = 1e-3,
-        btol: float = 1e-3,
         xtol: float = 1e-3,
         reinitialize_GKB: bool = True,
+        store_subspace_history: bool = False,
         **kwargs,
     ):
         """
@@ -169,8 +161,6 @@ class GLSQR(Algorithm):
         weight_operator : Operator, optional
             Tikhonov weight operator :math:`L`. The operator must have an inverse or pseudo-inverse
             method implemented.
-        maxoutit : int, optional
-            Maximum number of outer iterations. Default is the size of the domain.
         maxinit : int, optional
             Maximum number of inner iterations for L1 regularisation.
         tau : float, optional
@@ -189,15 +179,13 @@ class GLSQR(Algorithm):
 
         self.regalpha = regalpha
         self.reg_norm_type = reg_norm_type
-        self.maxoutit = maxoutit
 
         # L1-norm specific parameters
         self.maxinit = maxinit
         self.tau = tau
-        self.atol = atol
-        self.btol = btol
         self.xtol = xtol
         self.reinitialize_GKB = reinitialize_GKB
+        self._store_subspace_history = store_subspace_history
 
         # Initialise the algorithm
         self.set_up(
@@ -264,6 +252,20 @@ class GLSQR(Algorithm):
         """Perform a single iteration of the GLSQR algorithm."""
         # Perform GLSQR Iteration with optional IRLS regularisation for L1 norm
         self._perform_iteration()
+
+    def _initialize_subspace_history(self):
+        """Initialize storage for subspace scalars."""
+        # Initialise storage for alpha and beta history
+        self.alphavec = [self.alpha]
+        self.betavec = [self.beta]
+
+        self.k = 1  # Iteration counter for hybrid LSQR
+
+    def _update_subspace_history(self):
+        """Store history of alpha and beta."""
+        self.alphavec.append(self.alpha)
+        self.betavec.append(self.beta)
+        self.k += 1
 
     def _perform_iteration(self):
         """Perform a single LSQR iteration of GLSQR with optional IRLS for L1."""
@@ -345,6 +347,9 @@ class GLSQR(Algorithm):
         self.res2 = 0.0
         self.d = self.v.copy()
 
+        if self._store_subspace_history:
+            self._initialize_subspace_history()
+
     def _GKB_step(self):
         """single iteration of GKB"""
         # Update u: u = (Kv - alpha*u) / beta, beta is norm of numerator
@@ -383,6 +388,9 @@ class GLSQR(Algorithm):
         # d = v - d_update_coeff * d
         self.v.sapyb(1.0, self.d, -self.d_update_coeff, out=self.d)
 
+        if self._store_subspace_history:
+            self._update_subspace_history()
+
     def update_objective(self):
         """
         Update the objective function value (residual norm squared).
@@ -397,28 +405,16 @@ class GLSQR(Algorithm):
         xnorm = self.x.norm()
 
         # Tolerances scaled by initial residual beta0
-        rel_res_tol = self.atol * self.beta0
-        proj_grad_tol = self.btol * self.beta0
         step_tol = self.xtol * (xnorm + 1.0)
 
         # Calculate step norm: ||step_coeff * d||
         step_norm = abs(self.step_coeff) * self.d.norm()
 
         log.debug(
-            "Inner It %d: normr-tol: %.2e, phibar-tol: %.2e, step-tol: %.2e",
+            "Inner It %d: step-tol: %.2e",
             inner_it,
-            (self.normr - rel_res_tol),
-            (abs(self.phibar) - proj_grad_tol),
             (step_norm - step_tol),
         )
-
-        if self.normr <= rel_res_tol:
-            log.debug("Stopping Criteria: relative residual.")
-            return True
-
-        if abs(self.phibar) <= proj_grad_tol:
-            log.debug("Stopping Criteria: projected gradient.")
-            return True
 
         if step_norm <= step_tol:
             log.debug("Stopping Criteria: small relative step.")

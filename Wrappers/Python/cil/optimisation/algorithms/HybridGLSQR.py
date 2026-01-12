@@ -57,10 +57,6 @@ class HybridGLSQR(GLSQR):
             Maximum number of inner iterations for L1 regularisation.
         tau : float, optional
             Small positive parameter for L1 regularisation.
-        atol : float, optional
-            Absolute tolerance for stopping criteria for L1 regularisation.
-        btol : float, optional
-            Relative tolerance for stopping criteria for L1 regularisation.
         xtol : float, optional
             Solution change tolerance for stopping criteria for L1 regularisation.
         hybrid_reg_rule : UpdateRegGCV, UpdateRegDiscrep, UpdateRegLcurve, optional
@@ -75,11 +71,8 @@ class HybridGLSQR(GLSQR):
         reg_norm_type: str = "L2",
         struct_operator=None,
         regalpha: float = 0.0,
-        maxoutit: int = 50,
         maxinit: int = 20,
         tau: float = 1e-3,
-        atol: float = 1e-3,
-        btol: float = 1e-3,
         xtol: float = 1e-3,
         reinitialize_GKB: bool = True,
         hybrid_reg_rule=None,
@@ -110,10 +103,6 @@ class HybridGLSQR(GLSQR):
             Maximum number of inner iterations for L1 regularisation.
         tau : float, optional
             Small positive parameter for L1 regularisation.
-        atol : float, optional
-            Absolute tolerance for stopping criteria for L1 regularisation.
-        btol : float, optional
-            Relative tolerance for stopping criteria for L1 regularisation.
         xtol : float, optional
             Solution change tolerance for stopping criteria for L1 regularisation.
         hybrid_reg_rule : UpdateRegGCV, UpdateRegDiscrep, UpdateRegLcurve, optional
@@ -126,11 +115,9 @@ class HybridGLSQR(GLSQR):
                          regalpha=regalpha,
                          maxinit=maxinit,
                          tau=tau,
-                         atol=atol,
-                         btol=btol,
                          xtol=xtol,
-                         maxoutit=maxoutit,
                          reinitialize_GKB = reinitialize_GKB,
+                         store_subspace_history=True,
                          **kwargs)
         
         
@@ -140,12 +127,6 @@ class HybridGLSQR(GLSQR):
     
     def setup_hybridLSQR(self,hybrid_reg_rule=None):
         """Set up the regularisation parameter selection rule."""
-
-        # Initialise storage for alpha and beta history
-        self.alphavec = [self.alpha]
-        self.betavec = [self.beta]
-
-        self.k = 1  # Iteration counter for hybrid LSQR
 
         # Select rule instance
         if hybrid_reg_rule is not None:
@@ -172,12 +153,6 @@ class HybridGLSQR(GLSQR):
         # 4. Fill sub-diagonal: beta_2 to beta_k+1
         np.fill_diagonal(Bk[1:, :], self.betavec[1:self.k+1])
         return Bk
-    
-    def _append_scalar_history(self):
-        """Store history of alpha and beta."""
-        self.alphavec.append(self.alpha)
-        self.betavec.append(self.beta)
-        self.k += 1
 
     def update(self):
         """single iteration"""
@@ -185,7 +160,6 @@ class HybridGLSQR(GLSQR):
         self._perform_iteration()
 
         # Build Bk
-        self._append_scalar_history()
         Bk = self._build_projected_operator()
 
         # Select regularisation parameter
