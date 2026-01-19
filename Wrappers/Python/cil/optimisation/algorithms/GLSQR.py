@@ -136,7 +136,7 @@ class GLSQR(Algorithm):
         reg_norm_type: str = "L2",
         struct_operator=None,
         regalpha: float = 0.0,
-        ne_rtol: float = 0.1, # Relative tolerance for normal equations for IRLS inner loop
+        xtol: float = 0.1, # Relative tolerance for normal equations for IRLS inner loop
         tau: float = 1.0,
         tau_factor: float = 0.1,
         reinitialize_GKB: bool = True,
@@ -190,7 +190,7 @@ class GLSQR(Algorithm):
         self.reinitialize_GKB = reinitialize_GKB
 
         # Inner loop parameters for IRLS
-        self.ne_rtol = ne_rtol
+        self.xtol = xtol
         self.max_inner_iterations = max_inner_iterations
         self.total_gkb_iterations = 0 # Total GKB iterations across inner loops
 
@@ -245,23 +245,11 @@ class GLSQR(Algorithm):
         # 2. Identify Geometries
         self.domain_geom_solution = self.operator.domain_geometry()  # Space of u
         self.range_geom_data = self.operator.range_geometry()  # Space of b
+        if struct_operator is None:
+            self.range_geom_struct = self.domain_geom_solution
+        else:
+            self.range_geom_struct = struct_operator.range_geometry()
 
-        # 3. Define the regularisation operator (K = A L,  L = L_{\text{norm}} L_{\text{struct}})
-        # If L1 is used an additional space is allocated for the L1 weights
-        # That would be in the range of range_geom_struct
-        self.glsqr_operator = GLSQROperator(
-            domain_geometry=self.domain_geom_solution,
-            operator=operator, # Forward operator A
-            tau=self.tau,
-            tau_factor=self.tau_factor,
-            struct_operator=struct_operator,
-            norm_type=self.reg_norm_type,
-        ) 
-        # Use the range geometry of the structural operator for the weighted space vector x
-        self.range_geom_struct = self.glsqr_operator.range_geometry()
-
-        if self.reg_norm_type.upper() == "L1":
-            self.glsqr_operator.update_weights(self.initial, domain="image")
 
         # 4. Problem sizes (using safe shape product)
         self.domain_size = int(np.prod(self.domain_geom_solution.shape))
@@ -280,6 +268,29 @@ class GLSQR(Algorithm):
         self.tmp_range_data = self.range_geom_data.allocate(0) 
         self.tmp_range_struct = self.range_geom_struct.allocate(0)
         self.tmp_domain = self.domain_geom_solution.allocate(0)
+
+        # Initialize GLSQR Operator
+        self.glsqr_operator = GLSQROperator(
+            domain_geometry=self.domain_geom_solution,
+            range_geometry=self.range_geom_struct,
+            # Operators and Norm
+            operator=operator, # Forward operator A
+            struct_operator=struct_operator,
+            norm_type=self.reg_norm_type,
+            # Buffers
+            tmp_range=self.tmp_range_data,
+            tmp_domain=self.tmp_domain,
+            tmp_range_struct=self.tmp_range_struct,
+            # L1-norm parameters
+            tau=self.tau,
+            tau_factor=self.tau_factor,
+        ) 
+
+        # Initial weight update for L1 norm
+        # 1. Map initial guess to structure space
+        self.glsqr_operator.direct(self.initial, out=self.x)
+        if self.reg_norm_type.upper() == "L1":
+            self.glsqr_operator.update_weights(self.x)
 
         # Handle Gradient Operator special case
         if isinstance(self.glsqr_operator.L_struct, GradientOperator):
@@ -324,14 +335,15 @@ class GLSQR(Algorithm):
         # Update weights for next outer iteration
         self.glsqr_operator.update_weights(self.x, domain="range")
 
-    def _bidiag_update(self, input_vec, target_vec, op_func, shift_vec, scalar, buffer1, buffer2):
+    def _bidiag_update(self, input_vec, target_vec, op_func, shift_vec, scalar, buffer1):
         """
         Performs: target = (Op(input) - scalar * shift) / norm
         buffer1: Used to store Op(input). Must match Range of Op.
         buffer2: Used as internal workspace for Op (e.g. Solution Space for L_inv).
+        kwargs:  Extra buffers passed to op_func
         """
         # Apply Operator: buffer1 = Op(input_vec) using buffer2 as workspace
-        op_func(input_vec, buffer1, buffer2)
+        op_func(input_vec, out=buffer1)
 
         # Combine: buffer1 - scalar * shift_vec -> target_vec
         buffer1.sapyb(1.0, shift_vec, -scalar, out=target_vec)
@@ -352,18 +364,15 @@ class GLSQR(Algorithm):
 
         # 2. u = (b - Kx) / beta, beta is norm of numerator
         # K maps structure -> Data. Kx requires tmp_domain for L_inv application.
-        # We use tmp_range_data for the output of Kx before subtracting b
         self.beta = self._bidiag_update(
-            self.x, self.u, self.glsqr_operator.direct_A_L_inv, self.data, -1.0, 
-            self.tmp_range_data, self.tmp_domain
+            self.x, self.u, self.glsqr_operator.direct_A_L_inv, self.data, -1.0, self.tmp_range_data
         )
 
         # 3. v = (K*u - 0) / alpha, alpha is norm of numerator
         # K* maps Data -> structure.
         # We use tmp_range_struct for the output of K*u
         self.alpha = self._bidiag_update(
-            self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, 0.0, 
-            self.tmp_range_struct, self.tmp_domain
+            self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, 0.0, self.tmp_range_struct
         )
 
         # 4. Initialize scalars and search direction
@@ -371,7 +380,7 @@ class GLSQR(Algorithm):
         self.normr = self.beta
         self.beta0 = self.beta
         self.res2 = 0.0
-        self.d = self.v
+        self.d = self.v.copy()
 
         if self.store_subspace_history:
             self._initialize_subspace_history()
@@ -382,17 +391,17 @@ class GLSQR(Algorithm):
         # Input v is in Structure Space. Output u is in Data Space.
         self.beta = self._bidiag_update(
             self.v, self.u, self.glsqr_operator.direct_A_L_inv, self.u, self.alpha, 
-            self.tmp_range_data, self.tmp_domain
+            self.tmp_range_data
         )
 
         # 2. Update v: v = (K*u - beta*v) / alpha
         # Input u is in Data Space. Output v is in Structure Space.
         self.alpha = self._bidiag_update(
             self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, self.beta, 
-            self.tmp_range_struct, self.tmp_domain
+            self.tmp_range_struct
         )
 
-        # 3. Scalar Updates
+         # 3. Scalar Updates
         rhobar1 = np.hypot(self.rhobar, self.regalpha)
         psi = (self.regalpha / rhobar1) * self.phibar
         phibar_temp = (self.rhobar / rhobar1) * self.phibar
@@ -401,25 +410,20 @@ class GLSQR(Algorithm):
         c, s = rhobar1 / rho, self.beta / rho
 
         # Store coefficients for stopping criteria and updates
-        step_coeff = (c * phibar_temp) / rho
-        d_update_coeff = (s * self.alpha) / rho
+        self.step_coeff = (c * phibar_temp) / rho
+        self.d_update_coeff = (s * self.alpha) / rho
 
         # Update class state for next iteration
         self.rhobar = -c * self.alpha
         self.phibar = s * phibar_temp
         self.res2 += psi**2
-        
-        # Update residual norm estimate (normr)
-        self.res2 += psi**2
         self.normr = np.hypot(self.phibar, np.sqrt(self.res2))
 
-        # 4. Vector Updates
-        # Update solution: x = x + step_coeff * d
-        self.x.sapyb(1.0, self.d, step_coeff, out=self.x)
-        
-        # Update search direction: d = v - d_update_coeff * d
-        # We use self.v as the base and modify self.d in-place
-        self.v.sapyb(1.0, self.d, -d_update_coeff, out=self.d)
+        # 4. Vector Updates (Using stored coefficients)
+        # x = x + step_coeff * d
+        self.x.sapyb(1.0, self.d, self.step_coeff, out=self.x)
+        # d = v - d_update_coeff * d
+        self.v.sapyb(1.0, self.d, -self.d_update_coeff, out=self.d)
 
         if self.store_subspace_history:
             self._update_subspace_history()
@@ -445,24 +449,24 @@ class GLSQR(Algorithm):
         self.loss.append(self.normr**2)
 
     def _check_inner_stop(self, inner_it):
-        """Check inner stopping criteria for IRLS using Normal Equations Relative Tolerance."""
-        
-        # In LSQR, the norm of the gradient of the normal equations ||A^T r|| 
-        # is estimated by alpha * abs(phibar). 
-        # This is the standard 'ne_rtol' check for the inner solve.
-        current_grad_norm = self.alpha * abs(self.phibar)
-        
-        # Target scaled by the initial residual beta0
-        grad_tol = self.ne_rtol * self.beta0
+        """Check inner stopping criteria for IRLS"""
+        # Current image norm
+        xnorm = self.x.norm()
+
+        # Tolerances scaled by initial residual beta0
+        step_tol = self.xtol * (xnorm + 1.0)
+
+        # Calculate step norm: ||step_coeff * d||
+        step_norm = abs(self.step_coeff) * self.d.norm()
 
         log.debug(
-            "Inner It %d: grad_norm-tol: %.2e",
+            "Inner It %d: step-tol: %.2e",
             inner_it,
-            (current_grad_norm - grad_tol),
+            (step_norm - step_tol),
         )
 
-        if current_grad_norm <= grad_tol:
-            log.debug("Stopping Criteria: Normal Equations Relative Tolerance (ne_rtol) met.")
+        if step_norm <= step_tol:
+            log.debug("Stopping Criteria: small relative step.")
             return True
 
         return False
@@ -479,7 +483,7 @@ class GLSQR(Algorithm):
 
         """
         # Map back to original space
-        return self.glsqr_operator.inverse(self.x, tmp_range=self.tmp_range_struct, add_nullspace_correction=True)
+        return self.glsqr_operator.inverse(self.x, add_nullspace_correction=True)
 
     @property
     def ne_rtol(self):

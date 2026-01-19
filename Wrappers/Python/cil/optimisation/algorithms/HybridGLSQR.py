@@ -75,7 +75,7 @@ class HybridGLSQR(GLSQR):
         reg_norm_type: str = "L2",
         struct_operator=None,
         regalpha: float = 0.0,
-        ne_rtol: float = 0.1, # Relative tolerance for normal equations for IRLS inner loop
+        xtol: float = 0.1, # Relative tolerance for normal equations for IRLS inner loop
         tau: float = 1.0,
         tau_factor: float = 0.1,
         reinitialize_GKB: bool = True,
@@ -124,7 +124,7 @@ class HybridGLSQR(GLSQR):
                         reg_norm_type=reg_norm_type,
                         struct_operator=struct_operator,
                         regalpha=regalpha,
-                        ne_rtol=ne_rtol,
+                        xtol=xtol,
                         tau=tau,
                         tau_factor=tau_factor,
                         reinitialize_GKB=reinitialize_GKB,
