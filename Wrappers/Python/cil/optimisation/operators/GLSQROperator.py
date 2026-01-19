@@ -49,13 +49,14 @@ class GLSQROperator(LinearOperator):
     --------------- | --------------- | --------------- | ----------------------------------------------------
     A               | Domain (u)      | Range (A)       | The forward physics model.
     L_struct        | Domain (u)      | Range (L)       | Structural part (e.g., Gradient, Wavelets).
-    L_norm          | Range (L)       | Range (L)       | Square/Diagonal; operates on L_struct(x).
-    L (Combined)    | Domain (u)      | Range (L)       | Defined as L = L_norm * L_struct.
+    L_norm          | Range (L)       | Range (L)       | Square/Diagonal; operates on L_struct(u).
+    L (Combined)    | Domain (u)      | Range (L)       | Defined as L = L_norm L_struct.
     L_inv           | Range (L)       | Domain (u)      | Maps regularized variable \bar{x} back to u.
-    K = A * L_inv   | Range (L)       | Range (A)       | The Effective Operator used within GKB/GLSQR steps.
+    K = A L_inv     | Range (L)       | Range (A)       | The first Effective Operator used within GKB/GLSQR steps.
+    K* = L_inv* A*  | Range (A)       | Range (L)       | The second Effective Operator used within GKB/GLSQR steps.
 
     .. math::
-        L(x) = L_{\text{norm}}(L_{\text{struct}}(x))
+        L(u) = L_{\text{norm}}(L_{\text{struct}}(u))
 
     where :math:`L_{\text{norm}}` defines the norm type (L1 or L2) and
     :math:`L_{\text{struct}}` defines the structural properties of the regularisation
@@ -116,8 +117,9 @@ class GLSQROperator(LinearOperator):
         self,
         operator,
         domain_geometry,
-        range_geometry=None,
+        range_geometry,
         struct_operator=None,
+        tmp_range=None, tmp_domain=None, tmp_range_struct=None,
         norm_type: str = "L2",
         tau: float = 1,
         tau_factor: float = 0.1, # Set to 1 to disable adaptation
@@ -125,82 +127,94 @@ class GLSQROperator(LinearOperator):
         # Store forward operator
         self.operator = operator
 
-        # Parameters for IRLS L1 regularisation
-        self.tau = tau
-        self.tau_factor = tau_factor
-
-        # Validation
-        if self.tau <= 0: raise ValueError("tau must be positive.")
-        if not (0 < tau_factor < 1): raise ValueError("tau_factor must be in (0, 1).")
-
-        # Set structural operator
+        # Set structural operator and determine range geometry
         if struct_operator is not None:
             self.L_struct = struct_operator
         else:
             self.L_struct = IdentityOperator(domain_geometry)
-
-        # Calculate size from the existing shape property
-        self.domain_size = int(np.prod(domain_geometry.shape))
-
-        # Validate that the structural operator has an inverse method
+        if range_geometry is None:
+            range_geometry = self.L_struct.range_geometry()
         if not hasattr(self.L_struct, "inverse") and not hasattr(self.L_struct, "inverse_adjoint"):
             raise ValueError(
                 "The provided structural_operator must have an 'inverse' and 'inverse_adjoint' method implemented."
             )
-
-        # Set norm type
+        
+        # Select and initialize the norm operator
         self.norm_type = norm_type.upper()
-
-        # 1. Determine the range geometry
-        if range_geometry is None:
-            range_geometry = self.L_struct.range_geometry()
-
-        # 2. Select and initialize the norm operator
         if self.norm_type == "L2":
             self.L_norm = IdentityOperator(range_geometry)
         elif self.norm_type == "L1":
             # Allocate initial weights container (w = tau^-0.5)
             # Use allocate to create data, not just geometry
-            initial_weights = range_geometry.allocate(self.tau**-0.5)
+            initial_weights = range_geometry.allocate(tau**-0.5)
             self.L_norm = DiagonalOperator(initial_weights)
         else:
             raise ValueError(f"Unknown norm_type '{self.norm_type}'")
 
+        # Parameters for IRLS L1-norm and validation
+        if tau <= 0: raise ValueError("tau must be positive.")
+        if not (0 < tau_factor < 1): raise ValueError("tau_factor must be in (0, 1).")
+        self.tau = tau
+        self.tau_factor = tau_factor
+
+        # Temporary buffers for intermediate computations
+        if tmp_range is None:
+            self.tmp_range = range_geometry.allocate()
+        else:
+            self.tmp_range = tmp_range
+
+        if tmp_domain is None:
+            self.tmp_domain = domain_geometry.allocate()
+        else:
+            self.tmp_domain = tmp_domain
+
+        if tmp_range_struct is None:
+            self.tmp_range_struct = self.L_struct.range_geometry().allocate()
+        else:
+            self.tmp_range_struct = tmp_range_struct
+
+        # Calculate size from the existing shape property
+        self.domain_size = int(np.prod(domain_geometry.shape))
+
+        # Null-space correction for Gradient L2 case
         self._null_correction_vector = None
         self._is_gradient_l2 = (self.norm_type == "L2" and isinstance(self.L_struct, GradientOperator))
         
         if (self.norm_type == "L1" and isinstance(self.L_struct, GradientOperator)):
             raise NotImplementedError("L1 norm with Gradient structural operator is not implemented.")
 
+        # assert self.L_norm.range_geometry().dimension_labels == \
+        #     self.L_struct.range_geometry().dimension_labels
+
         super(GLSQROperator, self).__init__(
             domain_geometry=domain_geometry, range_geometry=range_geometry
         )
 
-    def direct_A_L_inv(self, x, out, tmp_domain):
+    def direct_A_L_inv(self, x, out):
         """
         Apply K = A L_inv. 
-        x: Struct Space
+        x: Range L
+        tmp: Solution Space
         out: Data Space (Range A)
-        tmp_domain: Solution Space (Range L_inv)
         """
-        # 1. L_inv: Weighted -> Solution (uses out as tmp_range internal workspace)
-        self.inverse(x, out=tmp_domain, tmp_range=out)
+        # 1. L_inv: Structure Range -> Solution Domain 
+        self.inverse(x, out=self.tmp_domain)
         
-        # 2. A: Solution -> Data
-        self.operator.direct(tmp_domain, out=out)
+        # 2. A: Solution Domain  -> Data  
+        self.operator.direct(self.tmp_domain, out=out)
 
-    def adjoint_A_L_inv(self, u, out, tmp_domain):
+    def adjoint_A_L_inv(self, x, out):
         """
         Apply K* = L_inv* A*
-        u: Data Space
-        out: Struct Space (Range L_inv*)
-        tmp_domain: Solution Space (Range A*)
+        x: Data Space
+        tmp: Solution Space
+        out: Range L
         """
         # 1. A*: Data -> Solution
-        self.operator.adjoint(u, out=tmp_domain)
+        self.operator.adjoint(x, out=self.tmp_domain)
         
         # 2. L_inv*: Solution -> Struct
-        self.inverse_adjoint(tmp_domain, out=out)
+        self.inverse_adjoint(self.tmp_domain, out=out)
 
     def direct(self, x, out=None):
         r"""Returns the :math:`L(x) = L_{\text{norm}}(L_{\text{struct}}(x))`
@@ -217,6 +231,8 @@ class GLSQROperator(LinearOperator):
         DataContainer or BlockDataContainer
             :math:`L(x) = L_{\text{norm}}(L_{\text{struct}}(x))`
 
+        x: solution space
+        out: struct range
         """
         if out is None:
             temp = self.L_struct.direct(x)
@@ -225,61 +241,44 @@ class GLSQROperator(LinearOperator):
             self.L_struct.direct(x, out=out)
             return self.L_norm.direct(out, out=out)
 
-    def adjoint(self, x, out=None, tmp_range=None):
+    def adjoint(self, x, out=None):
         """
         Returns L*(x) = L_struct*(L_norm*(x))
-        x: Weighted Space -> out: Solution Space
-        
-        Requires 'tmp_range' (Weighted/Struct Space) buffer because intermediate result 
-        cannot be stored in 'out' (Solution Space) due to size mismatch.
-        """
-        if out is None:
-            temp = self.L_norm.adjoint(x)
-            return self.L_struct.adjoint(temp)
-        
-        # Buffer management
-        if tmp_range is not None:
-            intermediate = tmp_range
-        else:
-            # Fallback (allocates) if user forgets buffer, unless L_norm is Identity
-            if self.norm_type == 'L2':
-                # Identity adjoint is no-op, passing x directly is safe if L_struct doesn't modify input
-                intermediate = x
-            else:
-                intermediate = self.range_geometry().allocate()
+        x: struct range
+        tmp: struct range
+        out: Solution Space
 
+        """
         # 1. L_norm*: Weighted -> Struct
-        self.L_norm.adjoint(x, out=intermediate)
+        self.L_norm.adjoint(x, out=self.tmp_range_struct)
+        if out is None:
+            return self.L_struct.adjoint(self.tmp_range_struct)
         
         # 2. L_struct*: Struct -> Solution
-        self.L_struct.adjoint(intermediate, out=out)
+        self.L_struct.adjoint(self.tmp_range_struct, out=out)
         return out
     
-    def _precompute_GA_vectors(self, tmp_domain, tmp_range):
-        """Precomputes the vector v used for G_A_dagger."""
-        # 1. w is the vector of ones (e) or normalized ones. 
-        # The math uses e (ones) for the final subtraction, so let's use ones.
-        tmp_domain.fill(1.0) 
+    def _precompute_null_space_projection_vector(self):
+        """Precomputes the vector v = (A^T * (A * e)) / (N * ||A * e / sqrt(N)||^2)
+        used for null-space correction in the inverse operations when using
+        GradientOperator with L2 norm."""
         
-        # 2. u_temp = A * e
-        self.operator.direct(tmp_domain, out=tmp_range)
+        # 1. u_temp = A * e (vector of ones (e))
+        self.operator.direct(self.tmp_domain.fill(1.0), out=self.tmp_range)
         
         # 3. norm_sq = ||A * e / sqrt(N)||^2
         # This simplifies to: (1/N) * ||A * e||^2
-        norm_Aw_sq = (tmp_range.norm()**2) / self.domain_size
+        norm_Aw_sq = (self.tmp_range.norm()**2) / self.domain_size
         
-        # 4. v = (A^T * u_temp) / (N * norm_Aw_sq)
-        # Note: the math box shows v = (A^T * u_temp) / ||u_temp/sqrt(N)||^2
-        self.operator.adjoint(tmp_range, out=tmp_domain)
+        # 4. v = (A^T * u_temp) (Solution Space)
+        self.operator.adjoint(self.tmp_range, out=self.tmp_domain)
 
         # 5. Store in null correction (Solution Space)
-        if self._null_correction_vector is None:
-             self._null_correction_vector = tmp_domain.copy() # Allocation (happens once)
-        else:
-             self._null_correction_vector.fill(tmp_domain)
+        # compute v / (N * norm_Aw_sq)
+        self._null_correction_vector = self.tmp_domain.copy()
         self._null_correction_vector.divide(self.domain_size * norm_Aw_sq, out=self._null_correction_vector)
 
-    def inverse(self, x, out=None, tmp_range=None, add_nullspace_correction=False):
+    def inverse(self, x, out=None, add_nullspace_correction=False):
         r"""Returns the inverse :math:`L^{-1}(x)=L_{\text{struct}}^{-1}(L_{\text{norm}}^{-1}(x))`
 
         Parameters
@@ -299,57 +298,30 @@ class GLSQROperator(LinearOperator):
             From 
             L_A^{\dagger} = (A-(A(I - L^{\dagger}L))^{\dagger}))L^{\dagger}
         """
+        # Step 1: Norm Inverse (range struct -> range struct)
+        self.L_norm.inverse(x, out=self.tmp_range_struct)
+        
         # --- Branch 1: Standard Inverse (Non-Gradient L2) ---
         if not self._is_gradient_l2:
-            if self.norm_type == 'L2':
-                # Identity Norm: L_norm^{-1} is Identity.
-                # Just apply L_struct^{-1}: Struct (x) -> Solution (out)
-                if out is None:
-                    return self.L_struct.inverse(x)
-                else:
-                    self.L_struct.inverse(x, out=out)
-                    return out
+            # Step 2: Structure Inverse (range struct -> Solution)
+            if out is None:
+                return self.L_struct.inverse(self.tmp_range_struct)
             else:
-                # L1 Norm: L_norm^{-1} is Diagonal inverse.
-                # Maps Weighted -> Struct.
-                
-                # Step 1: Unweight (Weighted -> Struct)
-                # We need a buffer because we can't write Struct data into Solution space 'out' directly if shapes differ.
-                if tmp_range is None:
-                    # Allocate temporary buffer if not provided
-                    tmp_buffer = self.range_geometry().allocate()
-                else:
-                    tmp_buffer = tmp_range
-
-                self.L_norm.inverse(x, out=tmp_buffer)
-                
-                # Step 2: Structure Inverse (Struct -> Solution)
-                if out is None:
-                    return self.L_struct.inverse(tmp_buffer)
-                else:
-                    self.L_struct.inverse(tmp_buffer, out=out)
-                    return out
+                self.L_struct.inverse(self.tmp_range_struct, out=out)
+                return out
         
         # --- Branch 2: Gradient L2 Logic (Null Space Correction) ---
         
-        # 1. Ensure v and norms are cached
+        # 1. Ensure are cached
         if self._null_correction_vector is None:
-            # Requires tmp_range to be Data Space buffer for A*e calculation.
-            # If tmp_range is missing, _precompute_GA_vectors will likely fail or need its own allocation logic.
-            # For this specific 'out=None' context, we assume a temp buffer must be created for precompute if missing.
-            precompute_buffer = tmp_range if tmp_range is not None else self.operator.range_geometry().allocate()
-            
-            # We also need a solution-domain buffer for the precompute output if 'out' is None.
-            sol_buffer = out if out is not None else self.domain_geometry().allocate()
-            
-            self._precompute_GA_vectors(sol_buffer, precompute_buffer)
+            self._precompute_null_space_projection_vector()
 
-        # 2. y = G_dagger * x (Struct -> Solution)
+        # 2. y = G_dagger x (Struct -> Solution)
         # Note: GradientOperator inverse usually handles x directly
         if out is None:
-            out = self.L_struct.inverse(x)
+            out = self.L_struct.inverse(self.tmp_range_struct)
         else:
-            self.L_struct.inverse(x, out=out)
+            self.L_struct.inverse(self.tmp_range_struct, out=out)
 
         # 3. s = mean(v^T * y)
         s = self._null_correction_vector.dot(out) / self.domain_size
@@ -360,7 +332,7 @@ class GLSQROperator(LinearOperator):
         # 5. Null-space correction
         if add_nullspace_correction:
             mean_out = out.sum() / self.domain_size
-            out.add(mean_out, out=out)
+            out.subtract(mean_out, out=out)
         
         return out
         
@@ -414,7 +386,7 @@ class GLSQROperator(LinearOperator):
         
         return out
 
-    def update_weights(self, x: DataContainer, domain: str = "image"):
+    def update_weights(self, x: DataContainer, domain: str = "struct"):
         """
         Update DiagonalOperator weights for IRLS L1 regularisation.
 
@@ -430,7 +402,6 @@ class GLSQROperator(LinearOperator):
         domain : {'image', 'struct', 'range'}, optional
             Defines the mathematical space of ``x`` to ensure weights are calculated
             from the structural coefficients:
-            - ``'image'`` (default): ``x`` is in domain space; apply :math:`L_{struct}`.
             - ``'struct'``: ``x`` is in structural/transform space; use directly.
             - ``'range'``: ``x`` is in weighted range space; apply :math:`L_{norm}^{-1}`.
         adapt_tau : bool, optional
@@ -446,15 +417,11 @@ class GLSQROperator(LinearOperator):
             # x is weighted coefficients (\bar{x})
             # L_norm^{-1} removes weights: Weighted -> Struct
             self.L_norm.inverse(x, out=d)
-        elif domain == "image":
-            # x is image (u)
-            # L_struct maps Image -> Struct
-            self.L_struct.direct(x, out=d)
         elif domain == "struct":
             # x is structural coefficients
             d.fill(x)
         else:
-            raise ValueError("domain must be 'image', 'struct', or 'range'")
+            raise ValueError("domain must be 'struct', or 'range'")
 
         # Adapt Tau
         self._adapt_tau()
