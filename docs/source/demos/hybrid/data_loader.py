@@ -220,11 +220,11 @@ def load_and_process_cylinder(dataset_no: int=5, reduce_size: bool = True,
 
 
     # Define projection operator
-    A = ProjectionOperator(ig, ag, device = "gpu")
+    #A = ProjectionOperator(ig, ag, device = "gpu")
 
     # Check geometry
     print(ac_data)
-    return ac_data, A, ig
+    return ac_data, ig, ag
 
 def load_and_process_sphere(angle_step: int = 5):
     """
