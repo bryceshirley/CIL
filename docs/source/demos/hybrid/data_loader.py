@@ -267,4 +267,4 @@ def load_and_process_sphere(angle_step: int = 5):
     A = ProjectionOperator(image_geometry=ig,
                         acquisition_geometry=absorption.geometry)
     
-    return data, A, ig, ground_truth
+    return absorption, A, ig, ground_truth
