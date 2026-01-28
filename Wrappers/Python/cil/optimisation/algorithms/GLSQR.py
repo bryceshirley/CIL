@@ -288,7 +288,7 @@ class GLSQR(Algorithm):
 
         # Initial weight update for L1 norm
         # 1. Map initial guess to structure space
-        self.glsqr_operator.direct(self.initial, out=self.x)
+        self.glsqr_operator.L_struct.direct(self.initial, out=self.x)
         if self.reg_norm_type.upper() == "L1":
             self.glsqr_operator.update_weights(self.x)
 
