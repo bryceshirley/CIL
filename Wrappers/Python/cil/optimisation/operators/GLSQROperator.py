@@ -23,6 +23,7 @@ from cil.optimisation.operators import (
     IdentityOperator,
     GradientOperator
 )
+from cil.optimisation.algorithms import LSQR
 import warnings
 import logging
 import numpy as np
@@ -177,11 +178,11 @@ class GLSQROperator(LinearOperator):
         self.domain_size = int(np.prod(domain_geometry.shape))
 
         # Null-space correction for Gradient L2 case
-        self._null_correction_vector = None
-        self._is_gradient_l2 = (self.norm_type == "L2" and isinstance(self.L_struct, GradientOperator))
+        # self._null_correction_vector = None
+        # self._is_gradient_l2 = (self.norm_type == "L2" and isinstance(self.L_struct, GradientOperator))
         
-        if (self.norm_type == "L1" and isinstance(self.L_struct, GradientOperator)):
-            raise NotImplementedError("L1 norm with Gradient structural operator is not implemented.")
+        # if (self.norm_type == "L1" and isinstance(self.L_struct, GradientOperator)):
+        #     raise NotImplementedError("L1 norm with Gradient structural operator is not implemented.")
 
         # assert self.L_norm.range_geometry().dimension_labels == \
         #     self.L_struct.range_geometry().dimension_labels
@@ -278,7 +279,7 @@ class GLSQROperator(LinearOperator):
         self._null_correction_vector = self.tmp_domain.copy()
         self._null_correction_vector.divide(self.domain_size * norm_Aw_sq, out=self._null_correction_vector)
 
-    def inverse(self, x, out=None, add_nullspace_correction=False):
+    def inverse(self, x, out=None): #, add_nullspace_correction=False):
         r"""Returns the inverse :math:`L^{-1}(x)=L_{\text{struct}}^{-1}(L_{\text{norm}}^{-1}(x))`
 
         Parameters
@@ -298,43 +299,51 @@ class GLSQROperator(LinearOperator):
             From 
             L_A^{\dagger} = (A-(A(I - L^{\dagger}L))^{\dagger}))L^{\dagger}
         """
-        # Step 1: Norm Inverse (range struct -> range struct)
-        self.L_norm.inverse(x, out=self.tmp_range_struct)
-        
-        # --- Branch 1: Standard Inverse (Non-Gradient L2) ---
-        if not self._is_gradient_l2:
-            # Step 2: Structure Inverse (range struct -> Solution)
-            if out is None:
-                return self.L_struct.inverse(self.tmp_range_struct)
-            else:
-                self.L_struct.inverse(self.tmp_range_struct, out=out)
-                return out
-        
-        # --- Branch 2: Gradient L2 Logic (Null Space Correction) ---
-        
-        # 1. Ensure are cached
-        if self._null_correction_vector is None:
-            self._precompute_null_space_projection_vector()
+        lsqr = LSQR(initial=self.tmp_range_struct,
+                    operator=self, 
+                    data=x)
+        lsqr.run(50)
+        print('check')
+        return lsqr.get_output()
 
-        # 2. y = G_dagger x (Struct -> Solution)
-        # Note: GradientOperator inverse usually handles x directly
-        if out is None:
-            out = self.L_struct.inverse(self.tmp_range_struct)
-        else:
-            self.L_struct.inverse(self.tmp_range_struct, out=out)
-
-        # 3. s = mean(v^T * y)
-        s = self._null_correction_vector.dot(out) / self.domain_size
-
-        # 4. G_A_dagger * x = y - s * e
-        out.subtract(s, out=out)
-
-        # 5. Null-space correction
-        if add_nullspace_correction:
-            mean_out = out.sum() / self.domain_size
-            out.subtract(mean_out, out=out)
+        # # Step 1: Norm Inverse (range struct -> range struct)
+        # self.L_norm.inverse(x, out=self.tmp_range_struct)
         
-        return out
+
+        # # Step 2: Structure Inverse (range struct -> Solution)
+        # if out is None:
+        #     return self.L_struct.inverse(self.tmp_range_struct)
+        # else:
+        #     self.L_struct.inverse(self.tmp_range_struct, out=out)
+        #     return out
+        
+        # # --- Branch 2: Gradient L2 Logic (Null Space Correction) ---
+        # lsqr_solver = LSQR(initial=self.tmp_domain, operator=self.L_struct,
+        #                    data=self.tmp_range_struct)
+            
+        # # 1. Ensure are cached
+        # if self._null_correction_vector is None:
+        #     self._precompute_null_space_projection_vector()
+
+        # # 2. y = G_dagger x (Struct -> Solution)
+        # # Note: GradientOperator inverse usually handles x directly
+        # if out is None:
+        #     out = self.L_struct.inverse(self.tmp_range_struct)
+        # else:
+        #     self.L_struct.inverse(self.tmp_range_struct, out=out)
+
+        # # 3. s = mean(v^T * y)
+        # s = self._null_correction_vector.dot(out) / self.domain_size
+
+        # # 4. G_A_dagger * x = y - s * e
+        # out.subtract(s, out=out)
+
+        # # 5. Null-space correction
+        # if add_nullspace_correction:
+        #     mean_out = out.sum() / self.domain_size
+        #     out.subtract(mean_out, out=out)
+        
+        # return out
         
     def inverse_adjoint(self, x, out):
         r"""Returns the adjoint of the inverse :math:`L^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
@@ -352,39 +361,39 @@ class GLSQROperator(LinearOperator):
         DataContainer or BlockDataContainer
             :math:`L^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
         """
-        if not self._is_gradient_l2:
-            # 1. L_struct^{-*}: Solution -> Struct
-            # 'out' is in Weighted Space (same geom as Struct), so we use it as buffer.
-            self.L_struct.inverse_adjoint(x, out=out)
-            
-            # 2. L_norm^{-*}: Struct -> Weighted (In-place)
-            self.L_norm.inverse_adjoint(out, out=out)
-            return out
+        # if not self._is_gradient_l2:
+        # 1. L_struct^{-*}: Solution -> Struct
+        # 'out' is in Weighted Space (same geom as Struct), so we use it as buffer.
+        self.L_struct.inverse_adjoint(x, out=out)
+        
+        # 2. L_norm^{-*}: Struct -> Weighted (In-place)
+        self.L_norm.inverse_adjoint(out, out=out)
+        return out
 
         # --- Gradient L2 Logic ---
 
-        # 1. Ensure v is cached
-        if self._null_correction_vector is None:
-            # We use 'out' (Weighted Space) as tmp_range? 
-            # No, precompute needs Data Space. This path is tricky if no buffer provided.
-            # Assuming precomputed already or creating internal temp.
-            # For robustness, we might allocate a temporary data container if needed here.
-            pass 
+        # # 1. Ensure v is cached
+        # if self._null_correction_vector is None:
+        #     # We use 'out' (Weighted Space) as tmp_range? 
+        #     # No, precompute needs Data Space. This path is tricky if no buffer provided.
+        #     # Assuming precomputed already or creating internal temp.
+        #     # For robustness, we might allocate a temporary data container if needed here.
+        #     pass 
 
-        # 2. mu = mean(x)
-        mu = x.sum() / self.domain_size
+        # # 2. mu = mean(x)
+        # mu = x.sum() / self.domain_size
 
-        # 3. x' = x - mu * v  (Stored in out to save memory? No, out is Weighted Space)
-        # We need a Solution Space buffer. 
-        # If strict no-allocation is required, caller must provide scratch Solution buffer.
-        # Assuming we can modify x or create temp.
-        x_temp = x.copy()
-        x_temp.sapyb(1.0, self._null_correction_vector, -mu, out=x_temp)
+        # # 3. x' = x - mu * v  (Stored in out to save memory? No, out is Weighted Space)
+        # # We need a Solution Space buffer. 
+        # # If strict no-allocation is required, caller must provide scratch Solution buffer.
+        # # Assuming we can modify x or create temp.
+        # x_temp = x.copy()
+        # x_temp.sapyb(1.0, self._null_correction_vector, -mu, out=x_temp)
 
-        # 4. Result = (G_dagger)^T * x'
-        self.L_struct.inverse_adjoint(x_temp, out=out)
+        # # 4. Result = (G_dagger)^T * x'
+        # self.L_struct.inverse_adjoint(x_temp, out=out)
         
-        return out
+        # return out
 
     def update_weights(self, x: DataContainer, domain: str = "struct"):
         """

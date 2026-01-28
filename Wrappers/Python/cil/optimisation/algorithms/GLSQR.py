@@ -483,37 +483,5 @@ class GLSQR(Algorithm):
 
         """
         # Map back to original space
-        return self.glsqr_operator.inverse(self.x, add_nullspace_correction=True)
-
-    @property
-    def ne_rtol(self):
-        """Relative tolerance for the Normal Equations inner loop."""
-        return self._ne_rtol
-
-    @ne_rtol.setter
-    def ne_rtol(self, value):
-        if value < 0:
-            raise ValueError("ne_rtol must be non-negative.")
-        self._ne_rtol = value
-
-    @property
-    def tau(self):
-        """Current smoothing parameter for IRLS weights."""
-        return self._tau
-
-    @tau.setter
-    def tau(self, value):
-        if value <= 0:
-            raise ValueError("tau must be strictly positive.")
-        self._tau = value
-
-    @property
-    def tau_factor(self):
-        """Factor used to decrease tau during iterations."""
-        return self._tau_factor
-
-    @tau_factor.setter
-    def tau_factor(self, value):
-        if not (0 < value <= 1):
-            raise ValueError("tau_factor must be in the range (0, 1].")
-        self._tau_factor = value
+        return self.glsqr_operator.inverse(self.x)#, add_nullspace_correction=True)
+   
