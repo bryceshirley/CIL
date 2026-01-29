@@ -21,8 +21,11 @@ from cil.optimisation.operators import (
     LinearOperator,
     DiagonalOperator,
     IdentityOperator,
-    GradientOperator
+    GradientOperator,
+    AdjointOperator
 )
+from cil.optimisation.algorithms import CGLS
+
 import warnings
 import logging
 import numpy as np
@@ -123,6 +126,7 @@ class GLSQROperator(LinearOperator):
         norm_type: str = "L2",
         tau: float = 1,
         tau_factor: float = 0.1, # Set to 1 to disable adaptation
+        maxit_inverse: float = 100
     ):
         # Store forward operator
         self.operator = operator
@@ -156,6 +160,7 @@ class GLSQROperator(LinearOperator):
         if not (0 < tau_factor <= 1): raise ValueError("tau_factor must be in (0, 1].")
         self.tau = tau
         self.tau_factor = tau_factor
+        self.maxit_inverse = maxit_inverse
 
         # Temporary buffers for intermediate computations
         if tmp_range is None:
@@ -311,30 +316,39 @@ class GLSQROperator(LinearOperator):
                 return out
         
         # --- Branch 2: Gradient L2 Logic (Null Space Correction) ---
+        if self._is_gradient_l2:
+            print('checking we get here')
+            cgls = CGLS(operator = self.L_struct, data = self.tmp_range_struct)
+            cgls.run(self.maxit_inverse, verbose=False)
+            if out is None:
+                return cgls.solution
+            else:
+                out = cgls.solution
+                return out 
+
+        # # 1. Ensure are cached
+        # if self._null_correction_vector is None:
+        #     self._precompute_null_space_projection_vector()
+
+        # # 2. y = G_dagger x (Struct -> Solution)
+        # # Note: GradientOperator inverse usually handles x directly
+        # if out is None:
+        #     out = self.L_struct.inverse(self.tmp_range_struct)
+        # else:
+        #     self.L_struct.inverse(self.tmp_range_struct, out=out)
+
+        # # 3. s = mean(v^T * y)
+        # s = self._null_correction_vector.dot(out) / self.domain_size
+
+        # # 4. G_A_dagger * x = y - s * e
+        # out.subtract(s, out=out)
+
+        # # 5. Null-space correction
+        # if add_nullspace_correction:
+        #     mean_out = out.sum() / self.domain_size
+        #     out.subtract(mean_out, out=out)
         
-        # 1. Ensure are cached
-        if self._null_correction_vector is None:
-            self._precompute_null_space_projection_vector()
-
-        # 2. y = G_dagger x (Struct -> Solution)
-        # Note: GradientOperator inverse usually handles x directly
-        if out is None:
-            out = self.L_struct.inverse(self.tmp_range_struct)
-        else:
-            self.L_struct.inverse(self.tmp_range_struct, out=out)
-
-        # 3. s = mean(v^T * y)
-        s = self._null_correction_vector.dot(out) / self.domain_size
-
-        # 4. G_A_dagger * x = y - s * e
-        out.subtract(s, out=out)
-
-        # 5. Null-space correction
-        if add_nullspace_correction:
-            mean_out = out.sum() / self.domain_size
-            out.subtract(mean_out, out=out)
-        
-        return out
+        # return out
         
     def inverse_adjoint(self, x, out):
         r"""Returns the adjoint of the inverse :math:`L^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
@@ -362,29 +376,38 @@ class GLSQROperator(LinearOperator):
             return out
 
         # --- Gradient L2 Logic ---
+        if self._is_gradient_l2:
+            print('checking we get here adjoint')
+            cgls = CGLS(operator = AdjointOperator(self.L_struct), data = x)
+            cgls.run(self.maxit_inverse, verbose=False)
+            if out is None:
+                return cgls.solution
+            else:
+                out = cgls.solution
+                return out 
+            
+        # # 1. Ensure v is cached
+        # if self._null_correction_vector is None:
+        #     # We use 'out' (Weighted Space) as tmp_range? 
+        #     # No, precompute needs Data Space. This path is tricky if no buffer provided.
+        #     # Assuming precomputed already or creating internal temp.
+        #     # For robustness, we might allocate a temporary data container if needed here.
+        #     pass 
 
-        # 1. Ensure v is cached
-        if self._null_correction_vector is None:
-            # We use 'out' (Weighted Space) as tmp_range? 
-            # No, precompute needs Data Space. This path is tricky if no buffer provided.
-            # Assuming precomputed already or creating internal temp.
-            # For robustness, we might allocate a temporary data container if needed here.
-            pass 
+        # # 2. mu = mean(x)
+        # mu = x.sum() / self.domain_size
 
-        # 2. mu = mean(x)
-        mu = x.sum() / self.domain_size
+        # # 3. x' = x - mu * v  (Stored in out to save memory? No, out is Weighted Space)
+        # # We need a Solution Space buffer. 
+        # # If strict no-allocation is required, caller must provide scratch Solution buffer.
+        # # Assuming we can modify x or create temp.
+        # x_temp = x.copy()
+        # x_temp.sapyb(1.0, self._null_correction_vector, -mu, out=x_temp)
 
-        # 3. x' = x - mu * v  (Stored in out to save memory? No, out is Weighted Space)
-        # We need a Solution Space buffer. 
-        # If strict no-allocation is required, caller must provide scratch Solution buffer.
-        # Assuming we can modify x or create temp.
-        x_temp = x.copy()
-        x_temp.sapyb(1.0, self._null_correction_vector, -mu, out=x_temp)
-
-        # 4. Result = (G_dagger)^T * x'
-        self.L_struct.inverse_adjoint(x_temp, out=out)
+        # # 4. Result = (G_dagger)^T * x'
+        # self.L_struct.inverse_adjoint(x_temp, out=out)
         
-        return out
+        # return out
 
     def update_weights(self, x: DataContainer, domain: str = "struct"):
         """
