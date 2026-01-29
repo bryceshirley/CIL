@@ -153,7 +153,7 @@ class GLSQROperator(LinearOperator):
 
         # Parameters for IRLS L1-norm and validation
         if tau <= 0: raise ValueError("tau must be positive.")
-        if not (0 < tau_factor < 1): raise ValueError("tau_factor must be in (0, 1).")
+        if not (0 < tau_factor <= 1): raise ValueError("tau_factor must be in (0, 1].")
         self.tau = tau
         self.tau_factor = tau_factor
 
