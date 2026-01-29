@@ -142,6 +142,7 @@ class GLSQR(Algorithm):
         reinitialize_GKB: bool = True,
         max_inner_iterations: int = 50, # Default maximum inner iterations for IRLS
         store_subspace_history: bool = False, 
+        maxit_inverse: int = 200,
         **kwargs,
     ):
         """
@@ -194,6 +195,9 @@ class GLSQR(Algorithm):
         self.max_inner_iterations = max_inner_iterations
         self.total_gkb_iterations = 0 # Total GKB iterations across inner loops
 
+        # Parameter for inversion of gradient operator via CGLS
+        self.maxit_inverse = maxit_inverse
+        
         # Store history of alpha and beta for projected operator construction
         self.store_subspace_history = store_subspace_history
 
