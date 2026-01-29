@@ -25,7 +25,7 @@ import logging
 from cil.utilities.multiprocessing import NUM_THREADS
 import numpy as np
 
-from scipy.fftpack import dctn, idctn, fftn, ifftn
+from scipy.fftpack import dctn, idctn, fftn, ifftn, dstn, idstn
 
 NEUMANN = 'Neumann'
 PERIODIC = 'Periodic'
@@ -40,7 +40,7 @@ class GradientOperator(LinearOperator):
 
     r"""
     Gradient Operator: Computes first-order forward/backward differences on
-    2D, 3D, 4D ImageData under Neumann/Periodic boundary conditions
+    2D, 3D, 4D ImageData under Neumann/Periodic/Dirichlet boundary conditions
 
     Parameters
     ----------
@@ -49,7 +49,7 @@ class GradientOperator(LinearOperator):
     method: str, default 'forward'
         Accepts: 'forward', 'backward', 'centered', note C++ optimised routine only works with 'forward'
     bnd_cond: str, default,  'Neumann'
-        Set the boundary conditions to use 'Neumann' or 'Periodic'
+        Set the boundary conditions to use 'Neumann', 'Periodic' or 'Dirichlet'
     **kwargs:
         correlation: str, default 'Space'
             'Space' will compute the gradient on only the spatial dimensions, 'SpaceChannels' will include the channel dimension direction
@@ -103,6 +103,9 @@ class GradientOperator(LinearOperator):
             domain_geometry.dimension_labels = [None]*len(domain_geometry.shape)
 
         if backend == C:
+            if bnd_cond == 'Dirichlet':
+                backend = NUMPY
+                log.warning("C backend does not support Dirichlet boundary conditions - defaulting to `numpy` backend")
             if self.correlation == CORRELATION_SPACE and domain_geometry.channels > 1:
                 backend = NUMPY
                 log.warning("C backend cannot use correlation='Space' on multi-channel dataset - defaulting to `numpy` backend")
@@ -113,6 +116,9 @@ class GradientOperator(LinearOperator):
                 backend = NUMPY
                 log.warning("C backend is only implemented for forward differences - defaulting to `numpy` backend")
         if backend == NUMPY:
+            if method != 'forward' and bnd_cond == 'Dirichlet':
+                log.warning("Numpy backend does not support Dirichlet boundary conditions with non-forward differences - defaulting to 'forward' differences")
+                method = 'forward'
             self.operator = Gradient_numpy(domain_geometry, bnd_cond=bnd_cond, **kwargs)
         else:
             self.operator = Gradient_C(domain_geometry, bnd_cond=bnd_cond, **kwargs)
@@ -187,7 +193,8 @@ class GradientOperator(LinearOperator):
         """
         if getattr(self.operator, 'method', 'forward') == 'centered':
             raise NotImplementedError("Spectral inverse not yet supported for centered differences.")
-    
+        # if getattr(self.operator, 'bnd_cond', 'Neumann') == 'Dirichlet':
+        #     raise NotImplementedError("Spectral inverse not yet supported for Dirichlet boundary conditions.")
         if out is None:
             out = self.domain_geometry().allocate()
         
@@ -228,6 +235,9 @@ class GradientOperator(LinearOperator):
         if getattr(self.operator, 'method', 'forward') == 'centered':
             raise NotImplementedError("Spectral inverse not yet supported for centered differences.")
 
+        # if getattr(self.operator, 'bnd_cond', 'Neumann') == 'Dirichlet':
+        #     raise NotImplementedError("Spectral inverse not yet supported for Dirichlet boundary conditions.")
+
         if out is None:
             out = self.range_geometry().allocate()
             
@@ -238,8 +248,17 @@ class GradientOperator(LinearOperator):
         self.direct(filtered_image, out=out)
         return out
 
-    def _spectral_inverse_core(self, x_image_space, eig_method_name, out=None):
-        """ Shared logic for spectral filtering in image domain. """
+    def _spectral_inverse_core(self, x_image_space, operation, out=None):
+        """ Shared logic for spectral filtering in image domain.
+        Parameters
+        ----------
+        x_image_space : ImageData
+            Image in ImageGeometry domain
+        operation : str
+            'inverse' or 'inverse_adjoint' to select eigenvalue operation
+        out : ImageData, optional
+            pre-allocated output memory to store result
+        """
         T, T_inv, eig_op = self._spectral_data
         
         # Transform to Frequency Domain
@@ -251,7 +270,7 @@ class GradientOperator(LinearOperator):
         tmp_freq = self.domain_geometry().allocate(dtype=target_complex_dtype)
         tmp_freq.fill(freq_arr)
 
-        getattr(eig_op, eig_method_name)(tmp_freq, out=tmp_freq)
+        getattr(eig_op, operation)(tmp_freq, out=tmp_freq)
 
         # Transform back to Spatial Image Space
         spatial_arr = T_inv(tmp_freq.as_array()).real
@@ -268,7 +287,10 @@ class GradientOperator(LinearOperator):
     @functools.cached_property
     def _spectral_data(self):
         """Lazy cache for transforms and eigenvalues."""
+        # Get Transform Operator and it's inverse
         T, T_inv = self._get_transform_operators()
+
+        # Get Eigenvalues Operator
         eig_op = self._get_nonzero_eigenvalues()
         
         # Handle Pseudo-inverse: 0 -> inf so 1/inf = 0
@@ -290,6 +312,10 @@ class GradientOperator(LinearOperator):
         elif bnd_cond in [1, 'periodic']:
             T = lambda x: fftn(x)
             T_inv = lambda x: ifftn(x)
+        elif bnd_cond in [2, 'dirichlet']:
+            norm = 'ortho'
+            T = lambda x: dstn(x, norm=norm, type=1)
+            T_inv = lambda x: idstn(x, norm=norm, type=1)
         else:
             raise NotImplementedError("Boundary condition not supported.")
 
@@ -301,22 +327,39 @@ class GradientOperator(LinearOperator):
         """
         bnd_cond = str(self.operator.bnd_cond).lower()
         geom = self.domain_geometry()
-        shape = geom.shape
-        spacing = geom.spacing
-        labels = geom.dimension_labels
+        shape = geom.shape # number of voxels
+        spacing = geom.spacing # voxel sizes
+        labels = geom.dimension_labels # dimension labels
         
-        factor = 2.0 if bnd_cond in ['0', 'neumann'] else 1.0
+        # Determine divisor N_eff based on BCs
+        # DST-I denominator is 2(N+1), DCT-II denominator is 2N
+        if bnd_cond in ['neumann', '0']:
+            # For DCT-II, freq is k / 2N
+            denom_func = lambda N: 2.0 * N
+        elif bnd_cond in ['periodic', '1']:
+            # For FFT, freq is k / N
+            denom_func = lambda N: 1.0 * N
+        elif bnd_cond in ['dirichlet', '2']:
+            # FIX: For DST-I, freq is k / 2(N+1)
+            denom_func = lambda N: 2.0 * (N + 1)
+        else:
+            raise NotImplementedError("Boundary condition not supported.")
+
         grids = np.ogrid[tuple(slice(0, N) for N in shape)]
         
-        # Determine active dimensions for gradient based on correlation
+        # Determine active dimensions
         active_mask = [
             not (self.correlation == "Space" and label == 'channel') and N > 1
             for N, label in zip(shape, labels)
         ]
 
-        # Sum eigenvalues across active dimensions
+        if bnd_cond in ['dirichlet', '2']:
+            # k = g + 1
+            grids = [g + 1 for g in grids]
+
+        # Sum eigenvalues (Kronecker sum equivalent)
         eigenvalues_array = sum(
-            (4.0 * (np.sin(np.pi * g / (factor * N))**2) / (h**2))
+            (4.0 * (np.sin(np.pi * g / denom_func(N))**2) / (h**2))
             for g, N, h, active in zip(grids, shape, spacing, active_mask)
             if active
         )
