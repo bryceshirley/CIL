@@ -126,7 +126,7 @@ class GLSQROperator(LinearOperator):
         norm_type: str = "L2",
         tau: float = 1,
         tau_factor: float = 0.1, # Set to 1 to disable adaptation
-        maxit_inverse: float = 100
+        maxit_inverse: int = 100
     ):
         # Store forward operator
         self.operator = operator
