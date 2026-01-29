@@ -24,7 +24,10 @@ from cil.optimisation.operators import (
     GradientOperator,
     AdjointOperator
 )
-from cil.optimisation.algorithms import CGLS
+from cil.optimisation.algorithms import CGLS, LSQR
+
+from cil.utilities.display import show2D
+
 
 import warnings
 import logging
@@ -121,12 +124,12 @@ class GLSQROperator(LinearOperator):
         operator,
         domain_geometry,
         range_geometry,
+        maxit_inverse,
         struct_operator=None,
         tmp_range=None, tmp_domain=None, tmp_range_struct=None,
         norm_type: str = "L2",
         tau: float = 1,
         tau_factor: float = 0.1, # Set to 1 to disable adaptation
-        maxit_inverse: int = 100
     ):
         # Store forward operator
         self.operator = operator
@@ -317,8 +320,10 @@ class GLSQROperator(LinearOperator):
         
         # --- Branch 2: Gradient L2 Logic (Null Space Correction) ---
         if self._is_gradient_l2:
-            print('checking we get here')
-            cgls = CGLS(operator = self.L_struct, data = self.tmp_range_struct)
+            cgls = CGLS(
+                operator = self.L_struct, 
+                data = self.tmp_range_struct,
+                )
             cgls.run(self.maxit_inverse, verbose=False)
             if out is None:
                 return cgls.solution
@@ -377,9 +382,12 @@ class GLSQROperator(LinearOperator):
 
         # --- Gradient L2 Logic ---
         if self._is_gradient_l2:
-            print('checking we get here adjoint')
-            cgls = CGLS(operator = AdjointOperator(self.L_struct), data = x)
+            cgls = CGLS(
+                operator = AdjointOperator(self.L_struct), 
+                data = x
+            )
             cgls.run(self.maxit_inverse, verbose=False)
+            
             if out is None:
                 return cgls.solution
             else:

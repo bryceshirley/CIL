@@ -288,6 +288,7 @@ class GLSQR(Algorithm):
             # L1-norm parameters
             tau=self.tau,
             tau_factor=self.tau_factor,
+            maxit_inverse = self.maxit_inverse
         ) 
 
         # Initial weight update for L1 norm
