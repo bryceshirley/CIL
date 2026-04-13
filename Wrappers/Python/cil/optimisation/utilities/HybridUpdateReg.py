@@ -448,7 +448,7 @@ class UpdateRegBase(ABC):
         self.Sbmin = self.Sb[-1]
 
         # Optimization Upper Bound
-        self.regalpha_high = self.Sbmax
+        self.regalpha_high = self.Sbmax*100
 
         # The first row of Ub corresponds to the projection of the
         # initial residual onto the left singular vectors of Bk.
