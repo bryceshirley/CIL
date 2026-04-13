@@ -116,9 +116,6 @@ class GradientOperator(LinearOperator):
                 backend = NUMPY
                 log.warning("C backend is only implemented for forward differences - defaulting to `numpy` backend")
         if backend == NUMPY:
-            if method != 'forward' and bnd_cond == 'Dirichlet':
-                log.warning("Numpy backend does not support Dirichlet boundary conditions with non-forward differences - defaulting to 'forward' differences")
-                method = 'forward'
             self.operator = Gradient_numpy(domain_geometry, bnd_cond=bnd_cond, **kwargs)
         else:
             self.operator = Gradient_C(domain_geometry, bnd_cond=bnd_cond, **kwargs)
@@ -193,8 +190,6 @@ class GradientOperator(LinearOperator):
         """
         if getattr(self.operator, 'method', 'forward') == 'centered':
             raise NotImplementedError("Spectral inverse not yet supported for centered differences.")
-        # if getattr(self.operator, 'bnd_cond', 'Neumann') == 'Dirichlet':
-        #     raise NotImplementedError("Spectral inverse not yet supported for Dirichlet boundary conditions.")
         if out is None:
             out = self.domain_geometry().allocate()
         
@@ -247,7 +242,7 @@ class GradientOperator(LinearOperator):
         # 2. Map back to Gradient Space
         self.direct(filtered_image, out=out)
         return out
-
+    
     def _spectral_inverse_core(self, x_image_space, operation, out=None):
         """ Shared logic for spectral filtering in image domain.
         Parameters
@@ -305,59 +300,83 @@ class GradientOperator(LinearOperator):
         if isinstance(bnd_cond, str):
             bnd_cond = bnd_cond.lower()
 
+        geom = self.domain_geometry()
+        
+        if self.correlation == "Space" and getattr(geom, 'channels', 1) > 1:
+            channel_axis = geom.dimension_labels.index('channel')
+            axes = tuple(i for i in range(len(geom.shape)) if i != channel_axis)
+        else:
+            axes = tuple(range(len(geom.shape)))
+
         if bnd_cond in [0, 'neumann']:
             norm = 'ortho' 
-            T = lambda x: dctn(x, norm=norm)
-            T_inv = lambda x: idctn(x, norm=norm)
+            T = lambda x: dctn(x, axes=axes, norm=norm, type=2)
+            T_inv = lambda x: idctn(x, axes=axes, norm=norm, type=2)
+            
         elif bnd_cond in [1, 'periodic']:
-            T = lambda x: fftn(x)
-            T_inv = lambda x: ifftn(x)
+            T = lambda x: fftn(x, axes=axes)
+            T_inv = lambda x: ifftn(x, axes=axes)
+            
         elif bnd_cond in [2, 'dirichlet']:
             norm = 'ortho'
-            T = lambda x: dstn(x, norm=norm, type=1)
-            T_inv = lambda x: idstn(x, norm=norm, type=1)
+            
+            # Helper: N-1 slices ONLY for active spatial dimensions
+            def get_active_slices(arr):
+                return tuple(slice(0, -1) if i in axes and s > 1 else slice(None) for i, s in enumerate(arr.shape))
+            
+            def T(x):
+                sl = get_active_slices(x)
+                res = np.zeros_like(x)
+                res[sl] = dstn(x[sl], axes=axes, norm=norm, type=1)
+                return res
+
+            def T_inv(x):
+                sl = get_active_slices(x)
+                res = np.zeros_like(x)
+                res[sl] = idstn(x[sl], axes=axes, norm=norm, type=1)
+                return res
         else:
-            raise NotImplementedError("Boundary condition not supported.")
+            raise NotImplementedError(f"Boundary condition {bnd_cond} not supported.")
 
         return T, T_inv
     
     def _get_nonzero_eigenvalues(self):
         """ Compute the eigenvalues of G*G and return as a DiagonalOperator.
-        Multidimensional eigenvalues are summed together using vectorized operations.
         """
         bnd_cond = str(self.operator.bnd_cond).lower()
         geom = self.domain_geometry()
-        shape = geom.shape # number of voxels
-        spacing = geom.spacing # voxel sizes
-        labels = geom.dimension_labels # dimension labels
+        shape = geom.shape 
+        spacing = geom.spacing 
+        labels = geom.dimension_labels 
         
-        # Determine divisor N_eff based on BCs
-        # DST-I denominator is 2(N+1), DCT-II denominator is 2N
+        # active axes detection
+        if self.correlation == "Space" and getattr(geom, 'channels', 1) > 1:
+            channel_axis = labels.index('channel')
+            axes = tuple(i for i in range(len(shape)) if i != channel_axis)
+        else:
+            axes = tuple(range(len(shape)))
+            
         if bnd_cond in ['neumann', '0']:
-            # For DCT-II, freq is k / 2N
             denom_func = lambda N: 2.0 * N
         elif bnd_cond in ['periodic', '1']:
-            # For FFT, freq is k / N
             denom_func = lambda N: 1.0 * N
         elif bnd_cond in ['dirichlet', '2']:
-            # For DST-I, freq is k / 2(N+1)
-            denom_func = lambda N: 2.0 * (N + 1)
+            # Active size is N-1. DST-I denominator is 2*(N_eff + 1) = 2N
+            denom_func = lambda N: 2.0 * N
         else:
             raise NotImplementedError("Boundary condition not supported.")
 
         grids = np.ogrid[tuple(slice(0, N) for N in shape)]
         
-        # Determine active dimensions
         active_mask = [
-            not (self.correlation == "Space" and label == 'channel') and N > 1
-            for N, label in zip(shape, labels)
+            (i in axes) and N > 1
+            for i, (N, label) in enumerate(zip(shape, labels))
         ]
 
         if bnd_cond in ['dirichlet', '2']:
-            # k = g + 1
+            # DST-I frequencies start at k=1
             grids = [g + 1 for g in grids]
 
-        # Sum eigenvalues (Kronecker sum equivalent)
         eigenvalues_array = sum(
             (4.0 * (np.sin(np.pi * g / denom_func(N))**2) / (h**2))
             for g, N, h, active in zip(grids, shape, spacing, active_mask)
@@ -366,6 +385,18 @@ class GradientOperator(LinearOperator):
 
         if isinstance(eigenvalues_array, (int, float)):
             eigenvalues_array = np.zeros(shape, dtype=getattr(geom, 'dtype', np.float32))
+
+        # Force the sacrificed boundary pixel's eigenvalue to 0 so the pseudo-inverse ignores it
+        if bnd_cond in ['dirichlet', '2']:
+            mask = np.ones(shape)
+            for i, active in enumerate(active_mask):
+                if active:
+                    slices = [slice(None)] * len(shape)
+                    slices[i] = -1
+                    mask[tuple(slices)] = 0
+            
+            # Use standard assignment to avoid ValueError on broadcast shapes
+            eigenvalues_array = eigenvalues_array * mask
 
         eig_container = geom.allocate()
         eig_container.fill(eigenvalues_array)

@@ -51,7 +51,7 @@ class TestGradientOperator(unittest.TestCase):
                                 self.ig_2D_voxel, self.ig_2D_chan_voxel, self.ig_3D_voxel, self.ig_3D_chan_voxel]
 
         test_matrix_backend_numpy = {  'backend':'numpy',
-                                            'bconditions': ['Neumann', 'Periodic'],
+                                            'bconditions': ['Neumann', 'Periodic', 'Dirichlet'],
                                             'correlation':['Space','SpaceChannels'],
                                             'method':['forward', 'backward', 'centered']}
 
@@ -496,6 +496,25 @@ class TestGradientOperator(unittest.TestCase):
                                                     correlation=corr, backend=backend)
 
                                 u = geom.allocate('random', seed=100)
+
+                                if bnd in ['Dirichlet', 'dirichlet']:
+                                    u_arr = u.as_array()
+                                    
+                                    # Determine which axes are spatial
+                                    if grad.correlation == "Space" and getattr(geom, 'channels', 1) > 1:
+                                        channel_axis = geom.dimension_labels.index('channel')
+                                        spatial_axes = tuple(i for i in range(u_arr.ndim) if i != channel_axis)
+                                    else:
+                                        spatial_axes = tuple(range(u_arr.ndim))
+                                    
+                                    # Zero out the boundary (-1) for EVERY spatial axis
+                                    for ax in spatial_axes:
+                                        sl = [slice(None)] * u_arr.ndim
+                                        sl[ax] = -1
+                                        u_arr[tuple(sl)] = 0
+                                        
+                                    u.fill(u_arr)
+
                                 x = grad.direct(u) 
                                 y = grad.inverse(x)
 
@@ -509,12 +528,22 @@ class TestGradientOperator(unittest.TestCase):
                                     # All axes EXCEPT the channel axis are spatial
                                     spatial_axes = tuple(i for i in range(u_arr.ndim) if i != channel_axis)
                                     
-                                    u_zero_mean = u_arr - numpy.mean(u_arr, axis=spatial_axes, keepdims=True)
-                                    y_zero_mean = y_arr - numpy.mean(y_arr, axis=spatial_axes, keepdims=True)
+                                    if bnd == 'Dirichlet':
+                                        # For Dirichlet, the mean should be zero due to boundary conditions
+                                        u_zero_mean = u_arr
+                                        y_zero_mean = y_arr
+                                    else:
+                                        u_zero_mean = u_arr - numpy.mean(u_arr, axis=spatial_axes, keepdims=True)
+                                        y_zero_mean = y_arr - numpy.mean(y_arr, axis=spatial_axes, keepdims=True)
                                 else:
                                     # Global mean for SpaceChannels or single channel data
-                                    u_zero_mean = u_arr - numpy.mean(u_arr)
-                                    y_zero_mean = y_arr - numpy.mean(y_arr)
+                                    if bnd == 'Dirichlet':
+                                        # For Dirichlet, the mean should be zero due to boundary conditions
+                                        u_zero_mean = u_arr
+                                        y_zero_mean = y_arr
+                                    else:
+                                        u_zero_mean = u_arr - numpy.mean(u_arr)
+                                        y_zero_mean = y_arr - numpy.mean(y_arr)
 
                                 try:
                                     numpy.testing.assert_allclose(u_zero_mean, y_zero_mean, atol=1e-4)
@@ -571,6 +600,21 @@ class TestGradientOperator(unittest.TestCase):
 
                             # 2. Reconstruction Test: G_adj (G_inv_adj u) = u (minus mean)
                             u = geom.allocate('random', seed=100)
+
+                            if bnd in ['Dirichlet', 'dirichlet']:
+                                u_arr = u.as_array()
+                                if grad.correlation == "Space" and getattr(geom, 'channels', 1) > 1:
+                                    channel_axis = geom.dimension_labels.index('channel')
+                                    spatial_axes = tuple(i for i in range(u_arr.ndim) if i != channel_axis)
+                                else:
+                                    spatial_axes = tuple(range(u_arr.ndim))
+                                
+                                for ax in spatial_axes:
+                                    sl = [slice(None)] * u_arr.ndim
+                                    sl[ax] = -1
+                                    u_arr[tuple(sl)] = 0
+                                u.fill(u_arr)
+
                             x = grad.inverse_adjoint(u) 
                             y = grad.adjoint(x)
 
@@ -584,12 +628,22 @@ class TestGradientOperator(unittest.TestCase):
                                 # All axes EXCEPT the channel axis are spatial
                                 spatial_axes = tuple(i for i in range(u_arr.ndim) if i != channel_axis)
                                 
-                                u_zero_mean = u_arr - numpy.mean(u_arr, axis=spatial_axes, keepdims=True)
-                                y_zero_mean = y_arr - numpy.mean(y_arr, axis=spatial_axes, keepdims=True)
+                                if bnd == 'Dirichlet':
+                                    # For Dirichlet, the mean should be zero due to boundary conditions
+                                    u_zero_mean = u_arr
+                                    y_zero_mean = y_arr
+                                else:
+                                    u_zero_mean = u_arr - numpy.mean(u_arr, axis=spatial_axes, keepdims=True)
+                                    y_zero_mean = y_arr - numpy.mean(y_arr, axis=spatial_axes, keepdims=True)
                             else:
                                 # Global mean for SpaceChannels or single channel data
-                                u_zero_mean = u_arr - numpy.mean(u_arr)
-                                y_zero_mean = y_arr - numpy.mean(y_arr)
+                                if bnd == 'Dirichlet':
+                                    # For Dirichlet, the mean should be zero due to boundary conditions
+                                    u_zero_mean = u_arr
+                                    y_zero_mean = y_arr
+                                else:
+                                    u_zero_mean = u_arr - numpy.mean(u_arr)
+                                    y_zero_mean = y_arr - numpy.mean(y_arr)
 
                             try:
                                 numpy.testing.assert_allclose(u_zero_mean, y_zero_mean, atol=1e-4)

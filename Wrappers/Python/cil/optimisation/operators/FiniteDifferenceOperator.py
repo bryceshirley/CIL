@@ -133,16 +133,15 @@ class FiniteDifferenceOperator(LinearOperator):
             
             elif self.boundary_condition == 'Dirichlet':
 
-                # left boundary: Forward diff uses u[1] - u[0]
-                np.subtract(x_asarr[tuple(self.get_slice(1,2))],\
-                            x_asarr[tuple(self.get_slice(0,1))],
-                            out = outa[tuple(self.get_slice(0,1))])
+                outa[tuple(self.get_slice(0, 1))] = x_asarr[tuple(self.get_slice(0, 1))]
+                
+                np.subtract(x_asarr[tuple(self.get_slice(1, -1))], \
+                            x_asarr[tuple(self.get_slice(0, -2))], \
+                            out = outa[tuple(self.get_slice(1, -1))])
 
-                # right boundary: Forward diff uses u[N] - u[N-1]
-                # Assuming Homogeneous Dirichlet where u[N] (ghost point) is 0
                 np.subtract(0, \
-                            x_asarr[tuple(self.get_slice(-1,None))],
-                            out = outa[tuple(self.get_slice(-1,None))])
+                            x_asarr[tuple(self.get_slice(-2, -1))], \
+                            out = outa[tuple(self.get_slice(-1, None))])
 
 
             else:
@@ -179,7 +178,16 @@ class FiniteDifferenceOperator(LinearOperator):
                             out = outa[tuple(self.get_slice(-1,None))])
 
             elif self.boundary_condition == 'Dirichlet':
-                raise NotImplementedError('Dirichlet boundary conditions not implemented for backward differences yet')
+
+                outa[tuple(self.get_slice(0, 1))] = x_asarr[tuple(self.get_slice(0, 1))]
+                
+                np.subtract(x_asarr[tuple(self.get_slice(1, -1))], \
+                            x_asarr[tuple(self.get_slice(0, -2))], \
+                            out = outa[tuple(self.get_slice(1, -1))])
+
+                np.subtract(0, \
+                            x_asarr[tuple(self.get_slice(-2, -1))], \
+                            out = outa[tuple(self.get_slice(-1, None))])
 
             else:
                 raise ValueError('Not implemented')
@@ -229,7 +237,13 @@ class FiniteDifferenceOperator(LinearOperator):
                 outa[tuple(self.get_slice(-1, None))] /= 2.
             
             elif self.boundary_condition == 'Dirichlet':
-                raise NotImplementedError('Dirichlet boundary conditions not implemented for backward differences yet')
+                outa[tuple(self.get_slice(0, 1))] = x_asarr[tuple(self.get_slice(1, 2))]
+                outa[tuple(self.get_slice(0, 1))] /= 2.0
+                
+                np.subtract(0, \
+                            x_asarr[tuple(self.get_slice(-2, -1))], \
+                            out=outa[tuple(self.get_slice(-1, None))])
+                outa[tuple(self.get_slice(-1, None))] /= 2.0
 
             else:
                 raise ValueError('Not implemented')
@@ -298,18 +312,10 @@ class FiniteDifferenceOperator(LinearOperator):
                             out = outa[tuple(self.get_slice(-1,None))])
             
             elif self.boundary_condition == 'Dirichlet':
-
-                # left boundary
-                # The backward difference needs x[-1] (left ghost). 
-                # For Dirichlet, x[-1] = 0. So out[0] = x[0] - 0.
-                outa[tuple(self.get_slice(0,1))] = x_asarr[tuple(self.get_slice(0,1))]
-
-                # right boundary
-                # The backward difference needs x[N-2], which exists in the domain.
-                # So this is the standard difference: x[N-1] - x[N-2].
-                np.subtract(x_asarr[tuple(self.get_slice(-1,None))],\
-                            x_asarr[tuple(self.get_slice(-2,-1))],
-                            out = outa[tuple(self.get_slice(-1,None))])
+                np.subtract(x_asarr[tuple(self.get_slice(1, None))], \
+                            x_asarr[tuple(self.get_slice(0, -1))], \
+                            out = outa[tuple(self.get_slice(0, -1))])
+                outa[tuple(self.get_slice(-1, None))] = 0.0
 
             else:
                 raise ValueError('Not implemented')
@@ -347,7 +353,11 @@ class FiniteDifferenceOperator(LinearOperator):
                             out = outa[tuple(self.get_slice(-1,None))])
 
             elif self.boundary_condition == 'Dirichlet':
-                raise NotImplementedError('Dirichlet boundary conditions not implemented for backward differences yet')
+
+                np.subtract(x_asarr[tuple(self.get_slice(1, None))], \
+                            x_asarr[tuple(self.get_slice(0, -1))], \
+                            out = outa[tuple(self.get_slice(0, -1))])
+                outa[tuple(self.get_slice(-1, None))] = 0.0
             
             else:
                 raise ValueError('Not implemented')
@@ -398,7 +408,12 @@ class FiniteDifferenceOperator(LinearOperator):
 
 
             elif self.boundary_condition == 'Dirichlet':
-                raise NotImplementedError('Dirichlet boundary conditions not implemented for backward differences yet')
+                outa[tuple(self.get_slice(0, 1))] = x_asarr[tuple(self.get_slice(1, 2))]
+                outa[tuple(self.get_slice(0, 1))] /= 2.0
+                np.subtract(0, \
+                            x_asarr[tuple(self.get_slice(-2, -1))], \
+                            out=outa[tuple(self.get_slice(-1, None))])
+                outa[tuple(self.get_slice(-1, None))] /= 2.0
             
             else:
                 raise ValueError('Not implemented')
