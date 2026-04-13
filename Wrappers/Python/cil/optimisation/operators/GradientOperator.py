@@ -340,7 +340,7 @@ class GradientOperator(LinearOperator):
             # For FFT, freq is k / N
             denom_func = lambda N: 1.0 * N
         elif bnd_cond in ['dirichlet', '2']:
-            # FIX: For DST-I, freq is k / 2(N+1)
+            # For DST-I, freq is k / 2(N+1)
             denom_func = lambda N: 2.0 * (N + 1)
         else:
             raise NotImplementedError("Boundary condition not supported.")
