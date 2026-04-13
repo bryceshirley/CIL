@@ -19,10 +19,10 @@
 from cil.framework.data_container import DataContainer
 from cil.optimisation.operators import (
     LinearOperator,
-    DiagonalOperator,
     IdentityOperator,
     GradientOperator
 )
+from cil.optimisation.operators.BlockDiagonalOperator import DiagonalOperator
 import warnings
 import logging
 import numpy as np
@@ -86,9 +86,8 @@ class GLSQROperator(LinearOperator):
     - **Wavelets:** :math:`L_{\text{struct}}` is a wavelet transform operator.
 
     - **Gradient:** :math:`L_{\text{struct}}` represents gradient operators
-        for gradient-based regularisation is currently only supported with L2 norm, it 
-        also requires an addtional null-space correction in the inverse operations and
-        storage of precomputed vector for efficient computation.
+        for gradient-based regularisation, gradients must have dirichlet boundary conditions
+        as these do not have a null-space and the inverse is exactly computable with FFT-based solvers.
 
     - **General:** :math:`L_{\text{struct}}` can be any linear operator that captures
         the desired structural properties of the solution.
@@ -142,12 +141,13 @@ class GLSQROperator(LinearOperator):
         # Select and initialize the norm operator
         self.norm_type = norm_type.upper()
         if self.norm_type == "L2":
-            self.L_norm = IdentityOperator(range_geometry)
+            self.L_norm = IdentityOperator(domain_geometry=range_geometry)
         elif self.norm_type == "L1":
             # Allocate initial weights container (w = tau^-0.5)
             # Use allocate to create data, not just geometry
             initial_weights = range_geometry.allocate(tau**-0.5)
-            self.L_norm = DiagonalOperator(initial_weights)
+            self.L_norm = DiagonalOperator(initial_weights, 
+                                           domain_geometry=range_geometry)
         else:
             raise ValueError(f"Unknown norm_type '{self.norm_type}'")
 
@@ -176,15 +176,10 @@ class GLSQROperator(LinearOperator):
         # Calculate size from the existing shape property
         self.domain_size = int(np.prod(domain_geometry.shape))
 
-        # Null-space correction for Gradient L2 case
-        self._null_correction_vector = None
-        self._is_gradient_l2 = (self.norm_type == "L2" and isinstance(self.L_struct, GradientOperator))
-        
-        if (self.norm_type == "L1" and isinstance(self.L_struct, GradientOperator)):
-            raise NotImplementedError("L1 norm with Gradient structural operator is not implemented.")
-
-        # assert self.L_norm.range_geometry().dimension_labels == \
-        #     self.L_struct.range_geometry().dimension_labels
+        # Ensure Gradient Operator has dirichlet boundary conditions 
+        # TODO: write unit test to check this conditioned is enforced.
+        if isinstance(self.L_struct, GradientOperator) and self.L_struct.bnd_cond != 'dirichlet':
+            raise ValueError("GLSQROperator requires GradientOperator with dirichlet boundary conditions due to its null-space properties.")
 
         super(GLSQROperator, self).__init__(
             domain_geometry=domain_geometry, range_geometry=range_geometry
@@ -257,28 +252,8 @@ class GLSQROperator(LinearOperator):
         # 2. L_struct*: Struct -> Solution
         self.L_struct.adjoint(self.tmp_range_struct, out=out)
         return out
-    
-    def _precompute_null_space_projection_vector(self):
-        """Precomputes the vector v = (A^T * (A * e)) / (N * ||A * e / sqrt(N)||^2)
-        used for null-space correction in the inverse operations when using
-        GradientOperator with L2 norm."""
-        
-        # 1. u_temp = A * e (vector of ones (e))
-        self.operator.direct(self.tmp_domain.fill(1.0), out=self.tmp_range)
-        
-        # 3. norm_sq = ||A * e / sqrt(N)||^2
-        # This simplifies to: (1/N) * ||A * e||^2
-        norm_Aw_sq = (self.tmp_range.norm()**2) / self.domain_size
-        
-        # 4. v = (A^T * u_temp) (Solution Space)
-        self.operator.adjoint(self.tmp_range, out=self.tmp_domain)
 
-        # 5. Store in null correction (Solution Space)
-        # compute v / (N * norm_Aw_sq)
-        self._null_correction_vector = self.tmp_domain.copy()
-        self._null_correction_vector.divide(self.domain_size * norm_Aw_sq, out=self._null_correction_vector)
-
-    def inverse(self, x, out=None, add_nullspace_correction=False):
+    def inverse(self, x, out=None):
         r"""Returns the inverse :math:`L^{-1}(x)=L_{\text{struct}}^{-1}(L_{\text{norm}}^{-1}(x))`
 
         Parameters
@@ -302,39 +277,12 @@ class GLSQROperator(LinearOperator):
         self.L_norm.inverse(x, out=self.tmp_range_struct)
         
         # --- Branch 1: Standard Inverse (Non-Gradient L2) ---
-        if not self._is_gradient_l2:
-            # Step 2: Structure Inverse (range struct -> Solution)
-            if out is None:
-                return self.L_struct.inverse(self.tmp_range_struct)
-            else:
-                self.L_struct.inverse(self.tmp_range_struct, out=out)
-                return out
-        
-        # --- Branch 2: Gradient L2 Logic (Null Space Correction) ---
-        
-        # 1. Ensure are cached
-        if self._null_correction_vector is None:
-            self._precompute_null_space_projection_vector()
-
-        # 2. y = G_dagger x (Struct -> Solution)
-        # Note: GradientOperator inverse usually handles x directly
+        # Step 2: Structure Inverse (range struct -> Solution)
         if out is None:
-            out = self.L_struct.inverse(self.tmp_range_struct)
+            return self.L_struct.inverse(self.tmp_range_struct)
         else:
             self.L_struct.inverse(self.tmp_range_struct, out=out)
-
-        # 3. s = mean(v^T * y)
-        s = self._null_correction_vector.dot(out) / self.domain_size
-
-        # 4. G_A_dagger * x = y - s * e
-        out.subtract(s, out=out)
-
-        # 5. Null-space correction
-        if add_nullspace_correction:
-            mean_out = out.sum() / self.domain_size
-            out.subtract(mean_out, out=out)
-        
-        return out
+            return out
         
     def inverse_adjoint(self, x, out):
         r"""Returns the adjoint of the inverse :math:`L^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
@@ -352,38 +300,13 @@ class GLSQROperator(LinearOperator):
         DataContainer or BlockDataContainer
             :math:`L^{-*}(x) = L_{\text{norm}}^{-*}(L_{\text{struct}}^{-*}(x))`
         """
-        if not self._is_gradient_l2:
-            # 1. L_struct^{-*}: Solution -> Struct
-            # 'out' is in Weighted Space (same geom as Struct), so we use it as buffer.
-            self.L_struct.inverse_adjoint(x, out=out)
-            
-            # 2. L_norm^{-*}: Struct -> Weighted (In-place)
-            self.L_norm.inverse_adjoint(out, out=out)
-            return out
-
-        # --- Gradient L2 Logic ---
-
-        # 1. Ensure v is cached
-        if self._null_correction_vector is None:
-            # We use 'out' (Weighted Space) as tmp_range? 
-            # No, precompute needs Data Space. This path is tricky if no buffer provided.
-            # Assuming precomputed already or creating internal temp.
-            # For robustness, we might allocate a temporary data container if needed here.
-            pass 
-
-        # 2. mu = mean(x)
-        mu = x.sum() / self.domain_size
-
-        # 3. x' = x - mu * v  (Stored in out to save memory? No, out is Weighted Space)
-        # We need a Solution Space buffer. 
-        # If strict no-allocation is required, caller must provide scratch Solution buffer.
-        # Assuming we can modify x or create temp.
-        x_temp = x.copy()
-        x_temp.sapyb(1.0, self._null_correction_vector, -mu, out=x_temp)
-
-        # 4. Result = (G_dagger)^T * x'
-        self.L_struct.inverse_adjoint(x_temp, out=out)
+        # if not self._is_gradient_l2:
+        # 1. L_struct^{-*}: Solution -> Struct
+        # 'out' is in Weighted Space (same geom as Struct), so we use it as buffer.
+        self.L_struct.inverse_adjoint(x, out=out)
         
+        # 2. L_norm^{-*}: Struct -> Weighted (In-place)
+        self.L_norm.inverse_adjoint(out, out=out)
         return out
 
     def update_weights(self, x: DataContainer, domain: str = "struct"):
