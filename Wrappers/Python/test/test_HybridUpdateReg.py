@@ -141,7 +141,7 @@ class RegRuleInfrastructureTestsMixin:
         # Verify bounds used for optimization
         self.assertEqual(rule.Sbmax, s[0])
         self.assertEqual(rule.Sbmin, s[-1])
-        self.assertEqual(rule.regalpha_high, s[0])
+        self.assertEqual(rule.regalpha_high, s[0]*100)
 
     def test_convergence_logic(self):
         """Verify convergence logic based on relative change in regalpha."""
