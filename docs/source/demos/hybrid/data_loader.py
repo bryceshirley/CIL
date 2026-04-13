@@ -6,13 +6,10 @@ from cil.io import TIFFStackReader
 # CIL processors
 from cil.processors import Binner, TransmissionAbsorptionConverter, Slicer
 
-# CIL plugins
-from cil.plugins.astra import ProjectionOperator
-
 # CIL optimisation algorithms and linear operators
 from cil.recon import FDK
 from cil.processors import TransmissionAbsorptionConverter, Slicer
-from cil.plugins.tigre import ProjectionOperator
+from cil.plugins.astra import ProjectionOperator
 
 # CIL imports for data loading and visualisation
 from cil.utilities.display import show2D
@@ -50,7 +47,11 @@ def load_and_process_walnut(angle_step: int = 25,
 
     print(f"Loading data from: {filename}")
     reader = ZEISSDataReader()
+
+    print("Setting up reader...")
     reader.set_up(file_name=filename)
+
+    print("Reading data...")
     data3D = reader.read()
     
     # --- 2. Pre-processing ---
@@ -267,4 +268,4 @@ def load_and_process_sphere(angle_step: int = 5):
     A = ProjectionOperator(image_geometry=ig,
                         acquisition_geometry=absorption.geometry)
     
-    return absorption, A, ig, ground_truth
+    return absorption, A, ig, ground_truth, recon
