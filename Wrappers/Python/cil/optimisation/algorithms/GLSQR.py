@@ -286,11 +286,8 @@ class GLSQR(Algorithm):
             tau_factor=self.tau_factor,
         ) 
 
-        # Initial weight update for L1 norm
         # 1. Map initial guess to structure space
         self.glsqr_operator.L_struct.direct(self.initial, out=self.x)
-        if self.reg_norm_type.upper() == "L1":
-            self.glsqr_operator.update_weights(self.x)
 
         # Initialise Golub-Kahan bidiagonalisation (GKB)
         self._initialize_GKB()
@@ -314,22 +311,23 @@ class GLSQR(Algorithm):
 
     def _run_irls_inner_loop(self):
         """Encapsulated inner loop for IRLS-style regularisation."""
+        # Update weights for next outer iteration
+        self.glsqr_operator.update_weights(self.x, domain="range")
+
         # Reset GKB for the new weights
-        if self.reinitialize_GKB:
-            self._initialize_GKB()  # Maps initial to weighted space
+        self._initialize_GKB()  # Maps initial to weighted space
 
         # Inner Loop
         for inner_it in range(self.max_inner_iterations):
             self._GKB_step()
-
             if self._check_inner_stop(inner_it):
                 break
 
         self.total_gkb_iterations += inner_it + 1
 
-        # Update weights for next outer iteration
-        self.glsqr_operator.update_weights(self.x, domain="range")
-
+        if not self.reinitialize_GKB:
+            self.initial = self.get_output()
+    
     def _bidiag_update(self, input_vec, target_vec, op_func, shift_vec, scalar, buffer1):
         """
         Performs: target = (Op(input) - scalar * shift) / norm

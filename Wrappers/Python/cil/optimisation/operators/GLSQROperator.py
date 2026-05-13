@@ -178,8 +178,9 @@ class GLSQROperator(LinearOperator):
 
         # Ensure Gradient Operator has dirichlet boundary conditions 
         # TODO: write unit test to check this conditioned is enforced.
-        if isinstance(self.L_struct, GradientOperator) and self.L_struct.bnd_cond != 'dirichlet':
-            raise ValueError("GLSQROperator requires GradientOperator with dirichlet boundary conditions due to its null-space properties.")
+        if isinstance(self.L_struct, GradientOperator):
+            if self.L_struct.operator.bnd_cond != 'Dirichlet':
+                raise ValueError("GLSQROperator requires GradientOperator with Dirichlet boundary conditions due to its null-space properties.")
 
         super(GLSQROperator, self).__init__(
             domain_geometry=domain_geometry, range_geometry=range_geometry
@@ -346,13 +347,13 @@ class GLSQROperator(LinearOperator):
         else:
             raise ValueError("domain must be 'struct', or 'range'")
 
-        # Adapt Tau
-        self._adapt_tau()
-
         # Update weights w = (x^2 + \tau^2)^{-1/4}
         d.power(2, out=d)
         d.add(self.tau**2, out=d)
         d.power(-0.25, out=d)
+
+        # Adapt Tau
+        self._adapt_tau()
 
     def _adapt_tau(self):
         """Adapts the smoothing parameter tau based on various strategies.
