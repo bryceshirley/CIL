@@ -33,4 +33,5 @@ from .BlurringOperator import BlurringOperator
 from .ProjectionMap import ProjectionMap
 from .WaveletOperator import WaveletOperator
 from .GLSQROperator import GLSQROperator
+from .PaddedDirichletOperator import PaddedDirichletGradientOperator
 
