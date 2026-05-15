@@ -511,7 +511,7 @@ class UpdateRegBase(ABC):
     def _geometric_grid(
         self,
         regalpha_limits: Optional[Tuple[float, float]] = None,
-        num_points: int = 80,
+        num_points: int = 200,
     ):
         r"""
         Generate a geometric grid of regularization parameters and evaluate the objective function
@@ -702,43 +702,31 @@ class UpdateRegDiscrep(UpdateRegBase):
         # ||r|| = sqrt(phi(alpha) + eta^2)
         res_norm_grid = np.sqrt(func_grid + self.noise_level_estimate**2)
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-
-        # --- Subplot 1: Discrepancy Function ---
-        ax1.semilogx(regalpha_grid, func_grid, label="Discrepancy $\phi(\\alpha)$")
-        ax1.axhline(0, color="gray", linestyle="--", alpha=0.7)
-        ax1.semilogx(
-            regalpha_grid[reg_idx],
-            func_grid[reg_idx],
+        # --- Plot: Residual Norm vs Noise Level ---
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.loglog(
+            regalpha_grid, res_norm_grid, label="Residual Norm $\|r_\\alpha\|_2$"
+        )
+        ax.semilogx(
+            self.regalpha,
+            self.noise_level_estimate,
             "ro",
             markersize=8,
             label=rf"$\alpha={self.regalpha:.3e}$",
         )
-        ax1.axvline(self.regalpha, color="gray", linestyle=":", alpha=0.5)
-        ax1.set_xlabel("Regularisation parameter ($\\alpha$)")
-        ax1.set_ylabel("$\|r_\\alpha\|_2^2 - \eta^2$")
-        ax1.set_title("Discrepancy Function Root")
-        ax1.legend()
-        ax1.grid(True, which="both", linestyle="--", alpha=0.5)
-
-        # --- Subplot 2: Residual Norm vs Noise Level ---
-        ax2.loglog(
-            regalpha_grid, res_norm_grid, label="Residual Norm $\|r_\\alpha\|_2$"
-        )
+        ax.axvline(self.regalpha, color="gray", linestyle=":", alpha=0.5)
         # Horizontal line for noise level estimate
-        ax2.axhline(
+        ax.axhline(
             self.noise_level_estimate,
             color="green",
             linestyle="--",
-            label=rf"Noise Level $\eta={self.noise_level_estimate:.2e}$",
+            label=rf"Noise Level Estimate $\eta={self.noise_level_estimate:.2e}$",
         )
-        ax2.loglog(regalpha_grid[reg_idx], res_norm_grid[reg_idx], "ro", markersize=8)
-        ax2.axvline(self.regalpha, color="gray", linestyle=":", alpha=0.5)
-        ax2.set_xlabel("Regularisation parameter ($\\alpha$)")
-        ax2.set_ylabel("$\|r_\\alpha\|_2$")
-        ax2.set_title("Residual Norm vs. Target Noise")
-        ax2.legend()
-        ax2.grid(True, which="both", linestyle="--", alpha=0.5)
+        ax.set_xlabel("Regularisation parameter ($\\alpha$)")
+        ax.set_ylabel("$\|r_\\alpha\|_2$")
+        ax.set_title("Residual Norm vs. Target Noise")
+        ax.legend()
+        ax.grid(True, which="both", linestyle="--", alpha=0.5)
 
         plt.tight_layout()
 
@@ -818,16 +806,31 @@ class UpdateRegGCV(UpdateRegBase):
         regalpha : float
             The updated regularization parameter.
         """
+
         if self.gcv_type == "adaptive-weighted":
             self.omega = self._adaptive_omega()
 
         # Grid search in log space to find a good starting point (x0)
-        regalpha_grid, func_grid, _ = self._geometric_grid()
+        regalpha_grid, func_grid, _ = self._geometric_grid(num_points=200)
 
-        # Find the peak from the grid, avoiding the very first/last points
-        # to bypass the boundary plateaus seen in your plots.
-        grid_search_idx = np.argmin(func_grid)
-        x0 = regalpha_grid[grid_search_idx]
+        # # Smooth the function values to mitigate noise in the gradient estimation
+        from scipy.ndimage import gaussian_filter1d
+        func_grid_smooth = gaussian_filter1d(func_grid, sigma=2)
+
+        # Find gradient
+        grad = np.gradient(func_grid_smooth, np.log(regalpha_grid))
+
+        # Define a noise tolerance (e.g., 1% of the maximum absolute gradient)
+        # This ignores tiny floating-point wiggles
+        grad_tolerance = 0.01 * np.max(np.abs(grad))
+
+        # Choose alpha where GCV meaningfully begins to increase
+        increasing_indices = np.where(grad > grad_tolerance)[0]
+        
+        if len(increasing_indices) > 0:
+            x0 = regalpha_grid[increasing_indices[0]] 
+        else:
+            x0 = regalpha_grid[np.argmin(func_grid)]
 
         # Minimize the log of alpha
         res = scipy.optimize.minimize(
@@ -970,7 +973,7 @@ class UpdateRegGCV(UpdateRegBase):
     def plot_function(
         self,
         regalpha_limits: Optional[Tuple[float, float]] = None,
-        num_points: int = 80,
+        num_points: int = 200,
         filepath: Optional[str] = None,
     ):
         r"""
@@ -980,7 +983,7 @@ class UpdateRegGCV(UpdateRegBase):
             regalpha_limits (Optional[Tuple[float, float]]):
                 The (min, max) range for :math:`\alpha`. Defaults to (self.regalpha_low, self.regalpha_high).
             num_points (int):
-                Number of points in the grid. Defaults to 80.
+                Number of points in the grid. Defaults to 200.
             filepath (Optional[str]):
                 If provided, saves the plot to the specified file path.
         """
@@ -1004,13 +1007,6 @@ class UpdateRegGCV(UpdateRegBase):
             "ro",
             markersize=8,
             label=rf"$\alpha={self.regalpha:.3e}$",
-        )
-        ax.semilogx(
-            regalpha_grid[grid_search_idx],
-            func_grid[grid_search_idx],
-            "bo",
-            markersize=8,
-            label=rf"Grid Search $\alpha={regalpha_grid[grid_search_idx]:.3e}$",
         )
         ax.axvline(self.regalpha, color="gray", linestyle=":", alpha=0.5)
         ax.set_xlabel("Regularisation parameter ($\\alpha$)")
@@ -1118,8 +1114,9 @@ class UpdateRegLcurve(UpdateRegBase, grid_search_mixin):
         Find alpha that maximizes curvature using a global nonconvex 1D optimizer.
         Handles negative or nonconvex functions efficiently for scalar reg.
         """
-        # Grid search for a robust starting point
-        x0, _, _, _ = self.grid_search()
+        regalpha_grid, func_grid, _ = self._geometric_grid()
+        min_idx = np.argmin(func_grid)
+        x0 = regalpha_grid[min_idx]
 
         # 3. Local Refinement: Bounded Optimization
         res = scipy.optimize.minimize(
@@ -1218,7 +1215,7 @@ class UpdateRegLcurve(UpdateRegBase, grid_search_mixin):
     def plot_function(
         self,
         regalpha_limits: Optional[Tuple[float, float]] = None,
-        num_points: int = 80,
+        num_points: int = 200,
         filepath: Optional[str] = None,
     ):
         r"""
@@ -1228,7 +1225,7 @@ class UpdateRegLcurve(UpdateRegBase, grid_search_mixin):
             regalpha_limits (Optional[Tuple[float, float]]):
                 The (min, max) range for :math:`\alpha`. Defaults to (self.regalpha_low, self.regalpha_high).
             num_points (int):
-                Number of points in the grid. Defaults to 80.
+                Number of points in the grid. Defaults to 200.
             filepath (Optional[str]):
 
 
@@ -1266,13 +1263,6 @@ class UpdateRegLcurve(UpdateRegBase, grid_search_mixin):
             markersize=8,
             label=rf"$\alpha={self.regalpha:.3e}$",
         )
-        ax.loglog(
-            self._projected_residual_norm_sq(alpha_grid_search),
-            self._projected_solution_norm_sq(alpha_grid_search),
-            "bo",
-            markersize=8,
-            label=rf"Grid Max $\alpha={alpha_grid_search:.3e}$",
-        )
         ax.set_xlabel(r"$\|B_k y(\alpha)-\|b\|_2 e_1\|_2$")
         ax.set_ylabel(r"$\|x(\alpha)\|_2$")
         ax.set_title("L-curve (projected)")
@@ -1292,13 +1282,6 @@ class UpdateRegLcurve(UpdateRegBase, grid_search_mixin):
             "ro",
             markersize=8,
             label=rf"$\alpha={self.regalpha:.3e}$",
-        )
-        ax2.semilogx(
-            alpha_grid_search,
-            -func_grid_search,
-            "bo",
-            markersize=8,
-            label=rf"Grid Max $\alpha={alpha_grid_search:.3e}$",
         )
         ax2.legend()
         # Dotted vertical line at chosen alpha
@@ -1329,11 +1312,11 @@ class UpdateRegReginska(UpdateRegBase, grid_search_mixin):
         Number of elements in the solution; corresponds to domain of the operator
         (denoted as 'n').
     mu : float, optional
-        The balancing parameter :math:`\mu` in the Reginska functional. Defaults to 1.0. Increasing
+        The balancing parameter :math:`\mu` in the Reginska functional. Defaults to 0.5. Increasing
         :math:`\mu` places more emphasis on minimizing the solution norm.
     """
 
-    def __init__(self, data_size: int, domain_size: int, tol: float = 1e-2, mu: float = 1.0):
+    def __init__(self, data_size: int, domain_size: int, tol: float = 1e-2, mu: float = 0.5):
         super().__init__(data_size, domain_size, tol)
         self.rule_type = "reginska"
         self.mu = mu
@@ -1344,7 +1327,7 @@ class UpdateRegReginska(UpdateRegBase, grid_search_mixin):
         Regińska minimization.
 
         Strategy:
-        1. Sample Phi'(alpha) on a log grid.
+        1. Sample alpha on a log grid.
         2. Detect sign changes (candidate stationary points).
         3. Refine roots with Brent's method.
         4. Reject flat / unstable minima.
@@ -1400,7 +1383,7 @@ class UpdateRegReginska(UpdateRegBase, grid_search_mixin):
 
         return 0.5 * (R2_p / denom_r + self.mu * X2_p / denom_x)
 
-    def plot_function(self, regalpha_limits=None, num_points=80, filepath=None):
+    def plot_function(self, regalpha_limits=None, num_points=200, filepath=None):
         """
         Plot the Reginska functional and L-curve over a range of regularization parameters.
         """
@@ -1426,13 +1409,6 @@ class UpdateRegReginska(UpdateRegBase, grid_search_mixin):
             markersize=8,
             label=rf"$\alpha={self.regalpha:.3e}$",
         )
-        ax1.loglog(
-            self._projected_residual_norm_sq(alpha_grid_search),
-            self._projected_solution_norm_sq(alpha_grid_search),
-            "bo",
-            markersize=8,
-            label=rf"Grid Max $\alpha={alpha_grid_search:.3e}$",
-        )
         ax1.set_xlabel(r"$\|B_k y(\alpha)-\|b\|_2 e_1\|_2$")
         ax1.set_ylabel(r"$\|x(\alpha)\|_2$")
         ax1.set_title("L-curve (projected)")
@@ -1450,13 +1426,6 @@ class UpdateRegReginska(UpdateRegBase, grid_search_mixin):
             "ro",
             markersize=8,
             label=rf"$\alpha={self.regalpha:.3e}$",
-        )
-        ax2.semilogx(
-            alpha_grid_search,
-            np.exp(func_grid_search),
-            "bo",
-            markersize=8,
-            label=rf"Grid Max $\alpha={alpha_grid_search:.3e}$",
         )
         ax2.legend()
         ax2.axvline(self.regalpha, color="gray", linestyle=":")
@@ -1494,7 +1463,7 @@ class UpdateRegUPRE(UpdateRegBase):
         trace_A = np.sum(self.Sbsq / (self.Sbsq + regalpha**2))
         return (1.0 / self.m) * r2 + (2.0 * self.sigma2 / self.m) * trace_A - self.sigma2
 
-    def plot_function(self, regalpha_limits=None, num_points=80, filepath=None):
+    def plot_function(self, regalpha_limits=None, num_points=200, filepath=None):
         regalpha_grid, func_grid, reg_idx = self._geometric_grid(regalpha_limits, num_points)
         fig, ax = plt.subplots(figsize=(8, 5))
         ax.semilogx(regalpha_grid, func_grid, label="UPRE $U(\\alpha)$")
