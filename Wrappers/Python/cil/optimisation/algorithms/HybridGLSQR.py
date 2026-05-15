@@ -30,41 +30,23 @@ class HybridGLSQR(GLSQR):
 
     Solves the regularised least-squares problem with hybrid regularisation.
     .. math::
-        \min_x \| Ax - b \|_2^2 + \alpha^2 \| L x \|_2^2
+        \min_u \| Au - b \|_2^2 + \alpha^2 \| L u \|_2^2
 
-    where :math:`A` is a linear operator, :math:`b` is the acquired data, :math:`L` is the regularisation operator, and :math:`\alpha` is the regularisation parameter.
+    where :math:`A` is a linear operator, :math:`b` is the acquired data, :math:`L` 
+    is the regularisation operator, and :math:`\alpha` is the regularisation parameter.
     The regularisation parameter is selected at each iteration using a specified rule.
 
-    Parameters
-        ----------
-        initial : DataContainer, optional
-            Initial guess for the solution.
-        operator : Operator
-            Linear operator representing the forward model.
-        data : DataContainer
-            Measured data.
-        regalpha : float, optional
-            Regularisation parameter. Default is 0 (no regularisation).
-        reg_norm_type : str, optional
-            Type of regularisation norm ('L1' or 'L2'). Default is 'L2'.
-        weight_operator : Operator, optional
-            Regularisation operator :math:`L`. The operator must have an inverse or pseudo-inverse
-            method implemented. If no weight_operator is provided, defaults to IdentityOperator
-            for 'L2' norm and DiagonalOperator for 'L1' norm.
-        maxoutit : int, optional
-            Maximum number of outer iterations. Default is the size of the domain.
-        maxinit : int, optional
-            Maximum number of inner iterations for L1 regularisation.
-        tau : float, optional
-            Small positive parameter for L1 regularisation.
-        atol : float, optional
-            Absolute tolerance for stopping criteria for L1 regularisation.
-        btol : float, optional
-            Relative tolerance for stopping criteria for L1 regularisation.
-        xtol : float, optional
-            Solution change tolerance for stopping criteria for L1 regularisation.
-        hybrid_reg_rule : UpdateRegGCV, UpdateRegDiscrep, UpdateRegLcurve, optional
-            Instance of a hybrid regularisation parameter selection rule. If None, defaults to UpdateRegGCV.
+    The GLSR algorithm transforms the problem into the standard tikhonov form
+
+    .. math::
+
+        \min_x \|K x - b\|_2^2 + \alpha^2 \| x \|_2^2,
+
+    where :math:`x = L u` and :math:`K = A L^{-1}`.
+
+    The hybrid aspect of the algorithm comes from the automatic selection of the 
+    regularisation parameter :math:`\alpha` at each iteration using a specified rule, 
+    such as GCV, Reginska, UPRE, Discrepancy Principle, or L-curve.
     """
 
     def __init__(
@@ -88,32 +70,28 @@ class HybridGLSQR(GLSQR):
 
         Parameters
         ----------
-        initial : DataContainer, optional
-            Initial guess for the solution.
         operator : Operator
             Linear operator representing the forward model.
         data : DataContainer
-            Measured data.
+            Measured data (right-hand side of the equation).
+        initial : DataContainer, optional
+            Initial guess for the solution. If not provided, a zero-initialised container is used.
         regalpha : float, optional
-            Regularisation parameter. Default is 0 (no regularisation).
+            Non-negative regularisation parameter. If zero, standard LSQR is used.
         reg_norm_type : str, optional
             Type of regularisation norm ('L1' or 'L2'). Default is 'L2'.
-        weight_operator : Operator, optional
-            Regularisation operator :math:`L`. The operator must have an inverse or pseudo-inverse
-            method implemented. If no weight_operator is provided, defaults to IdentityOperator
-            for 'L2' norm and DiagonalOperator for 'L1' norm.
-        maxoutit : int, optional
-            Maximum number of outer iterations. Default is the size of the domain.
-        maxinit : int, optional
-            Maximum number of inner iterations for L1 regularisation.
+        struct_operator : Operator, optional
+            Regularisation operator :math:`L`. If not provided, defaults to IdentityOperator.
         tau : float, optional
             Small positive parameter for L1 regularisation.
-        atol : float, optional
-            Absolute tolerance for stopping criteria for L1 regularisation.
-        btol : float, optional
-            Relative tolerance for stopping criteria for L1 regularisation.
         xtol : float, optional
-            Solution change tolerance for stopping criteria for L1 regularisation.
+            Relative tolerance for normal equations for IRLS inner loop. Default is 0.1.
+        tau_factor : float, optional
+            Factor to decrease tau at each outer iteration for L1 regularisation. Default is 0.1.
+        reinitialize_GKB : bool, optional
+            Whether to reinitialize the Golub-Kahan Bidiagonalisation (GKB) at each outer iteration for L1 regularisation. Default is True.
+        max_inner_iterations : int, optional
+            Maximum number of inner iterations for IRLS regularisation. Default is 50.
         hybrid_reg_rule : UpdateRegGCV, UpdateRegDiscrep, UpdateRegLcurve, optional
             Instance of a hybrid regularisation parameter selection rule. If None, defaults to UpdateRegGCV.
         """
@@ -129,10 +107,7 @@ class HybridGLSQR(GLSQR):
                         tau_factor=tau_factor,
                         reinitialize_GKB=reinitialize_GKB,
                         max_inner_iterations=max_inner_iterations,
-                        store_subspace_history=True, # Subspace history needed for hybrid
                          **kwargs)
-        if self.store_subspace_history is False:
-            raise ValueError("HybridGLSQR requires store_subspace_history=True")
         
         # Set up hybrid regularisation parameter selection rule
         self.setup_hybridLSQR(hybrid_reg_rule=hybrid_reg_rule)
@@ -152,6 +127,35 @@ class HybridGLSQR(GLSQR):
                 gcv_weight=1.0,
                 adaptive_weight=True,
             )
+    
+    def _initialize_GKB(self):
+        """
+        Override parent method to also initialize subspace history for 
+        hybrid regularisation.
+        """
+        super()._initialize_GKB()
+
+        self._initialize_subspace_history()
+    
+    def _GKB_step(self):
+        """
+        Override parent method to perform a GKB step and then update the 
+        regularisation parameter using the hybrid rule.
+        """
+        super()._GKB_step()
+        self._update_subspace_history()
+
+    def _initialize_subspace_history(self):
+        """Initialise history of alpha and beta."""
+        self.alphavec = [self.alpha]
+        self.betavec = [self.beta]
+        self.k = 1  # Iteration counter for hybrid LSQR
+    
+    def _update_subspace_history(self):
+        """Store history of alpha and beta."""
+        self.alphavec.append(self.alpha)
+        self.betavec.append(self.beta)
+        self.k += 1
 
     def _build_projected_operator(self):
         """
@@ -168,9 +172,10 @@ class HybridGLSQR(GLSQR):
         return Bk
 
     def update(self):
-        """single iteration"""
-        # Perform LSQR iteration
-        self._perform_iteration()
+        """Override parent method to perform a single iteration of the GLSQR 
+        algorithm with hybrid regularisation."""
+        # Perform a single LSQR iteration of GLSQR with optional IRLS for L1.
+        super().update()
 
         # Build Bk
         Bk = self._build_projected_operator()

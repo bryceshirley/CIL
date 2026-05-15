@@ -35,23 +35,24 @@ class GLSQR(Algorithm):
 
     .. math::
 
-        \min_x \|A x - b\|_2^2
+        \min_u \|A u - b\|_2^2
 
     More generally, LSQR can be applied to a **non-standard L2 regularisation problem**:
 
     .. math::
 
-        \min_x \|A x - b\|_2^2 + \alpha^2 \|L x\|_2^2,
+        \min_u \|A u - b\|_2^2 + \alpha^2 \|L u\|_2^2,
 
-    where :math:`L=L_{\text{norm}} L_{\text{struct}}`.
+    where :math:`L=L_{\text{norm}} L_{\text{struct}}` is a instance of the
+    `IRLSRegularisationOperator` class.
 
     With assumptions that :math:`L` is full rank and has an inverse, the problem 
     can be transformed into a standard tikhonov form in the structure space of 
-    :math:`u = L x`
+    :math:`x = L u`
 
     .. math::
 
-        \min_u \|K u - b\|_2^2 + \alpha^2 \| u \|_2^2,
+        \min_x \|K x - b\|_2^2 + \alpha^2 \| x \|_2^2,
 
     where :math:`K = A L^{-1}` is the effective operator mapping from the structure 
     space to the data space.
@@ -60,7 +61,7 @@ class GLSQR(Algorithm):
 
     .. math::
 
-        x(\alpha) = L^{-1} u.
+        u(\alpha) = L^{-1} x.
 
     The operator :math:`K = A L^{-1}` is handled via the `GLSQROperator` class.
 
@@ -107,7 +108,6 @@ class GLSQR(Algorithm):
         tau_factor: float = 0.1,
         reinitialize_GKB: bool = True,
         max_inner_iterations: int = 50, # Default maximum inner iterations for IRLS
-        store_subspace_history: bool = False, 
         **kwargs,
     ):
         """
@@ -137,8 +137,6 @@ class GLSQR(Algorithm):
             Whether to reinitialize the Golub-Kahan Bidiagonalisation (GKB) at each outer iteration for L1 regularisation. Default is True.
         max_inner_iterations : int, optional
             Maximum number of inner iterations for IRLS regularisation. Default is 50.
-        store_subspace_history : bool, optional
-            Whether to store the history of alpha and beta scalars for projected operator construction. Default is False.
         """
         super().__init__(**kwargs)
 
@@ -157,9 +155,6 @@ class GLSQR(Algorithm):
         self.xtol = xtol
         self.max_inner_iterations = max_inner_iterations
         self.total_gkb_iterations = 0 # Total GKB iterations across inner loops
-
-        # Store history of alpha and beta for projected operator construction
-        self.store_subspace_history = store_subspace_history
 
         # Initialise the algorithm
         self.set_up(
@@ -257,11 +252,6 @@ class GLSQR(Algorithm):
         log.info("%s configured", self.__class__.__name__)
 
     def update(self):
-        """Perform a single iteration of the GLSQR algorithm."""
-        # Perform GLSQR Iteration with optional IRLS regularisation for L1 norm
-        self._perform_iteration()
-
-    def _perform_iteration(self):
         """Perform a single LSQR iteration of GLSQR with optional IRLS for L1."""
         if self.reg_norm_type.upper() == "L1":
             # IRLS requires inner iterations for L1 norm.
@@ -336,9 +326,6 @@ class GLSQR(Algorithm):
         self.res2 = 0.0
         self.d = self.v.copy()
 
-        if self.store_subspace_history:
-            self._initialize_subspace_history()
-
     def _GKB_step(self):
         """single iteration of GKB"""
         # 1. Update u: u = (Kv - alpha*u) / beta
@@ -378,21 +365,6 @@ class GLSQR(Algorithm):
         self.x.sapyb(1.0, self.d, self.step_coeff, out=self.x)
         # d = v - d_update_coeff * d
         self.v.sapyb(1.0, self.d, -self.d_update_coeff, out=self.d)
-
-        if self.store_subspace_history:
-            self._update_subspace_history()
-
-    def _initialize_subspace_history(self):
-        """Initialise history of alpha and beta."""
-        self.alphavec = [self.alpha]
-        self.betavec = [self.beta]
-        self.k = 1  # Iteration counter for hybrid LSQR
-    
-    def _update_subspace_history(self):
-        """Store history of alpha and beta."""
-        self.alphavec.append(self.alpha)
-        self.betavec.append(self.beta)
-        self.k += 1
 
     def update_objective(self):
         """
