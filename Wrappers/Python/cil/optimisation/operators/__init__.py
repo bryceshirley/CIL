@@ -34,4 +34,5 @@ from .ProjectionMap import ProjectionMap
 from .WaveletOperator import WaveletOperator
 from .GLSQROperator import GLSQROperator
 from .PaddedDirichletOperator import PaddedDirichletGradientOperator
+from .IRLSRegularisationOperator import IRLSRegularisationOperator
 

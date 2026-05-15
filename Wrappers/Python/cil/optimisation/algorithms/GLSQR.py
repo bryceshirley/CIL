@@ -17,7 +17,7 @@
 # CIL Developers and contributers, listed at: https://github.com/TomographicImaging/CIL/blob/master/NOTICE.txt
 from cil.framework import DataContainer
 from cil.optimisation.algorithms import Algorithm
-from cil.optimisation.operators import GLSQROperator, GradientOperator
+from cil.optimisation.operators import GLSQROperator
 import numpy as np
 import logging
 
@@ -41,41 +41,28 @@ class GLSQR(Algorithm):
 
     .. math::
 
-        \min_u \|A u - b\|_2^2 + \alpha^2 \|L u\|_2^2,
+        \min_x \|A x - b\|_2^2 + \alpha^2 \|L x\|_2^2,
 
     where :math:`L=L_{\text{norm}} L_{\text{struct}}`.
 
-    Without assumptions on the structure of :math:`L_{\text{struct}}`, this problem is equivalent
-    to the standard-form Tikhonov problem (Chung and Gazzola, 2024):
+    With assumptions that :math:`L` is full rank and has an inverse, the problem 
+    can be transformed into a standard tikhonov form in the structure space of 
+    :math:`u = L x`
 
     .. math::
 
-        \bar{x}(\alpha)
-        = \underset{\bar{x}}{\mathrm{argmin}}
-        \;\|A L_A^{\dagger} \bar{x} - \bar{b}\|_2^2
-        + \alpha^2 \|\bar{x}\|_2^2,
+        \min_u \|K u - b\|_2^2 + \alpha^2 \| u \|_2^2,
 
-    where:
+    where :math:`K = A L^{-1}` is the effective operator mapping from the structure 
+    space to the data space.
 
-    - :math:`L_A^{\dagger}
-        = \left(I - (A(I - L^\dagger L))^\dagger A\right) L^\dagger`
-    is the :math:`A`-weighted generalised inverse of :math:`L`.
-
-    - The solution to the original problem is recovered via
+    The solution to the original problem is recovered via
 
     .. math::
 
-        u(\alpha) = L_A^{\dagger} \bar{x}(\alpha) + u_0^{L},
+        x(\alpha) = L^{-1} u.
 
-    where :math:`u_0^{L}` is the component of :math:`u` in the null space of :math:`L`.
-
-    - The modified right-hand side is
-
-    .. math::
-
-        \bar{b} = b - u_0^{L}.
-
-    The operator :math:`L` is handled via the `GLSQROperator` class.
+    The operator :math:`K = A L^{-1}` is handled via the `GLSQROperator` class.
 
     The Norm Operator :math:`L_{\text{norm}}`
     ------------------------------------------
@@ -97,31 +84,10 @@ class GLSQR(Algorithm):
         for gradient-based regularisation (e.g., Total Variation).
 
     - **General:** :math:`L_{\text{struct}}` can be any linear operator that captures
-        the desired structural properties of the solution and has an inverse or pseudo-inverse 
+        the desired structural properties of the solution and has an inverse 
         method implemented.
 
     The Structural Operator must have an `inverse` method implemented.
-
-    Parameters
-    ----------
-    operator : Operator
-        Linear operator representing the forward model.
-    data : DataContainer
-        Measured data (right-hand side of the equation).
-    initial : DataContainer, optional
-        Initial guess for the solution. If not provided, a zero-initialised container is used.
-    alpha : float, optional
-        Non-negative regularisation parameter. If zero, standard LSQR is used.
-    reg_norm_type : str, optional
-        Type of regularisation norm ('L1' or 'L2'). Default is 'L2'.
-    weight_operator : Operator, optional
-        Regularisation operator :math:`L`. If not provided, defaults to IdentityOperator.
-    tau : float, optional
-        Small positive parameter for L1 regularisation.
-    atol : float, optional
-        Absolute tolerance for stopping criteria for L1 regularisation.
-    ne_rtol : float, optional
-        Estimated residual tolerance for stopping criteria for L1 regularisation.
 
     Reference
     ---------
@@ -149,32 +115,30 @@ class GLSQR(Algorithm):
 
         Parameters
         ----------
-        initial : DataContainer, optional
-            Initial guess for the solution.
         operator : Operator
             Linear operator representing the forward model.
         data : DataContainer
-            Measured data.
+            Measured data (right-hand side of the equation).
+        initial : DataContainer, optional
+            Initial guess for the solution. If not provided, a zero-initialised container is used.
         regalpha : float, optional
-            Regularisation parameter. Default is 0 (no regularisation).
+            Non-negative regularisation parameter. If zero, standard LSQR is used.
         reg_norm_type : str, optional
             Type of regularisation norm ('L1' or 'L2'). Default is 'L2'.
-        weight_operator : Operator, optional
-            Tikhonov weight operator :math:`L`. The operator must have an inverse or pseudo-inverse
-            method implemented.
+        struct_operator : Operator, optional
+            Regularisation operator :math:`L`. If not provided, defaults to IdentityOperator.
         tau : float, optional
             Small positive parameter for L1 regularisation.
+        xtol : float, optional
+            Relative tolerance for normal equations for IRLS inner loop. Default is 0.1.
         tau_factor : float, optional
-            Factor to decrease tau at each outer iteration for L1 regularisation.
-        ne_rtol : float, optional
-            Estimated residual tolerance for stopping criteria for L1 regularisation.
+            Factor to decrease tau at each outer iteration for L1 regularisation. Default is 0.1.
         reinitialize_GKB : bool, optional
-            Whether to reinitialize the Golub-Kahan Bidiagonalisation (GKB) at
-            each outer iteration for L1 regularisation.
+            Whether to reinitialize the Golub-Kahan Bidiagonalisation (GKB) at each outer iteration for L1 regularisation. Default is True.
         max_inner_iterations : int, optional
-            Maximum number of inner iterations for L1 regularisation.
+            Maximum number of inner iterations for IRLS regularisation. Default is 50.
         store_subspace_history : bool, optional
-            Whether to store the history of alpha and beta scalars for projected operator construction.
+            Whether to store the history of alpha and beta scalars for projected operator construction. Default is False.
         """
         super().__init__(**kwargs)
 
@@ -286,9 +250,6 @@ class GLSQR(Algorithm):
             tau_factor=self.tau_factor,
         ) 
 
-        # 1. Map initial guess to structure space
-        self.glsqr_operator.L_struct.direct(self.initial, out=self.x)
-
         # Initialise Golub-Kahan bidiagonalisation (GKB)
         self._initialize_GKB()
 
@@ -312,7 +273,7 @@ class GLSQR(Algorithm):
     def _run_irls_inner_loop(self):
         """Encapsulated inner loop for IRLS-style regularisation."""
         # Update weights for next outer iteration
-        self.glsqr_operator.update_weights(self.x, domain="range")
+        self.glsqr_operator.reg_operator.update_weights(self.x, domain="range")
 
         # Reset GKB for the new weights
         self._initialize_GKB()  # Maps initial to weighted space
@@ -353,19 +314,19 @@ class GLSQR(Algorithm):
         Initialise the GKB process for GLSQR with weighting.
         """
         # 1. Map initial guess to structure space
-        self.glsqr_operator.direct(self.initial, out=self.x)
+        self.glsqr_operator.reg_operator.direct(self.initial, out=self.x)
 
         # 2. u = (b - Kx) / beta, beta is norm of numerator
         # K maps structure -> Data. Kx requires tmp_domain for L_inv application.
         self.beta = self._bidiag_update(
-            self.x, self.u, self.glsqr_operator.direct_A_L_inv, self.data, -1.0, self.tmp_range_data
+            self.x, self.u, self.glsqr_operator.direct, self.data, -1.0, self.tmp_range_data
         )
 
         # 3. v = (K*u - 0) / alpha, alpha is norm of numerator
         # K* maps Data -> structure.
         # We use tmp_range_struct for the output of K*u
         self.alpha = self._bidiag_update(
-            self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, 0.0, self.tmp_range_struct
+            self.u, self.v, self.glsqr_operator.adjoint, self.v, 0.0, self.tmp_range_struct
         )
 
         # 4. Initialize scalars and search direction
@@ -383,14 +344,14 @@ class GLSQR(Algorithm):
         # 1. Update u: u = (Kv - alpha*u) / beta
         # Input v is in Structure Space. Output u is in Data Space.
         self.beta = self._bidiag_update(
-            self.v, self.u, self.glsqr_operator.direct_A_L_inv, self.u, self.alpha, 
+            self.v, self.u, self.glsqr_operator.direct, self.u, self.alpha, 
             self.tmp_range_data
         )
 
         # 2. Update v: v = (K*u - beta*v) / alpha
         # Input u is in Data Space. Output v is in Structure Space.
         self.alpha = self._bidiag_update(
-            self.u, self.v, self.glsqr_operator.adjoint_A_L_inv, self.v, self.beta, 
+            self.u, self.v, self.glsqr_operator.adjoint, self.v, self.beta, 
             self.tmp_range_struct
         )
 
@@ -476,4 +437,4 @@ class GLSQR(Algorithm):
 
         """
         # Map back to original space
-        return self.glsqr_operator.inverse(self.x)
+        return self.glsqr_operator.reg_operator.inverse(self.x)
