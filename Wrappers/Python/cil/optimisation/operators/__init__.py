@@ -32,7 +32,7 @@ from .ChannelwiseOperator import ChannelwiseOperator
 from .BlurringOperator import BlurringOperator
 from .ProjectionMap import ProjectionMap
 from .WaveletOperator import WaveletOperator
+from .IRLSRegularisationOperator import IRLSRegularisationOperator
 from .GLSQROperator import GLSQROperator
 from .PaddedDirichletOperator import PaddedDirichletGradientOperator
-from .IRLSRegularisationOperator import IRLSRegularisationOperator
 
