@@ -8,6 +8,24 @@ from typing import Optional, Tuple
 
 log = logging.getLogger(__name__)
 
+from dataclasses import dataclass
+
+@dataclass(slots=True)
+class ProjectedSubspace:
+    singular_values: np.ndarray
+    singular_values_sq: np.ndarray
+    u1: np.ndarray
+    u1_tail: float
+    b_norm: float
+
+    @property
+    def sigma_max(self):
+        return self.singular_values[0]
+
+    @property
+    def sigma_min(self):
+        return self.singular_values[-1]
+
 
 class UpdateRegBase(ABC):
     """Base class for updating regularization parameters in iterative solvers.
@@ -39,6 +57,15 @@ class UpdateRegBase(ABC):
         self.n = domain_size
         self.tol = tol
 
+    
+    def initialize_subspace_history(self, alpha, beta):
+        """Initialise history of alpha and beta."""
+        self.alphavec = [alpha]
+        self.betavec = [beta]
+        self.b_norm = beta
+        self.k = 1 
+        self.iteration = 1
+
         # History and state variables
         self.regalpha = 0.0
         self.regalpha_history = []  # History of regularization parameters
@@ -52,37 +79,43 @@ class UpdateRegBase(ABC):
         self.regalpha_low = 0.0
         self.regalpha_high = None
 
-    def update_regularizationparam(self, Bk, b_norm):
+    def _update_subspace_history(self, alpha, beta):
+        """Store history of alpha and beta."""
+        self.alphavec.append(alpha)
+        self.betavec.append(beta)
+        self.k += 1
+        self.iteration += 1
+    
+    def _build_projected_operator(self):
+        """
+        Builds the (k+1) x k bidiagonal projected operator Bk.
+        """
+        # 2. Pre-allocate Bk for this specific subspace size
+        Bk = np.zeros((self.k + 1, self.k))
+
+        # 3. Fill main diagonal: alpha_1 to alpha_k
+        np.fill_diagonal(Bk, self.alphavec[:self.k])
+
+        # 4. Fill sub-diagonal: beta_2 to beta_k+1
+        np.fill_diagonal(Bk[1:, :], self.betavec[1:self.k+1])
+        return Bk
+
+    def update_regalpha(self, alpha, beta):
         """Main entry point to update the regularization parameter.
 
         Parameters
         ----------
-        Bk : np.ndarray
-            The projection matrix (k+1 x k).
-        b_norm : float
-            The norm of the initial right-hand side (data) vector.
+        alpha : float
+            The next alpha value.
+        beta : float
+            The next beta value.
         """
-        # Validation for runtime inputs
-        if not isinstance(Bk, np.ndarray):
-            raise TypeError(f"Bk must be a numpy.ndarray, got {type(Bk)}")
-
-        k_plus_1, k = Bk.shape
-        if k_plus_1 != k + 1:
-            raise ValueError(f"Bk must have shape (k+1, k). Got {Bk.shape}")
-
-        if k > self.n or k_plus_1 > self.m:
-            raise ValueError(
-                f"Krylov subspace size {k} cannot exceed operator dimensions (m={self.m}, n={self.n})"
-            )
-
-        if not np.isscalar(b_norm):
-            raise TypeError(f"b_norm must be a scalar norm, got {type(b_norm)}")
-
-        # Update iteration count
-        self.iteration = Bk.shape[1]
+        # Update the subspace history with the new alpha and beta values
+        self._update_subspace_history(alpha, beta)
+        Bk = self._build_projected_operator()
 
         # Compute SVD and initialize subspace components
-        self._initialize_subspace_components(Bk, b_norm)
+        self._initialize_subspace_components(Bk)
 
         # Compute the next regularization parameter
         new_regalpha = self._compute_next_regalpha()
@@ -105,6 +138,41 @@ class UpdateRegBase(ABC):
 
             self._run_convergence_checks()
         self._log_status()
+    
+    def _initialize_subspace_components(self, Bk):
+        """
+        Perform SVD decomposition of the projected operator and initialize
+        subspace components for regularization parameter selection.
+
+        The projected right-hand side is decomposed into:
+        1. **Head components**: Associated with the $k$ singular values in the
+           current Krylov subspace, representing the regularizable signal.
+        2. **Tail component**: The $(k+1)$-th component representing the
+           residual portion orthogonal to the current subspace, which defines
+           the "noise floor" for the L-curve and Discrepancy Principle.
+
+        Parameters
+        ----------
+        Bk : np.ndarray
+            The $(k+1 \times k)$ projection matrix from the bidiagonalization
+            process.
+        """
+        # Ub is (k+1 x k+1), Sb is (k,)
+        Ub, self.Sb, _ = scipy.linalg.svd(Bk)
+
+        # Store squared singular values and extrema
+        self.Sbsq = np.square(self.Sb)
+        self.Sbmax = self.Sb[0]
+        self.Sbmin = self.Sb[-1]
+
+        # Optimization Upper Bound
+        self.regalpha_high = self.Sbmax*100
+
+        # The first row of Ub corresponds to the projection of the
+        # initial residual onto the left singular vectors of Bk.
+        # Head: first k elements; Tail: the (k+1)-th element.
+        self.u1 = Ub[0, :-1]
+        self.u1_tail = Ub[0, -1]
 
     def _residual_filter(self, reg):
         """
@@ -417,47 +485,6 @@ class UpdateRegBase(ABC):
             The computed function value.
         """
         pass
-
-    def _initialize_subspace_components(self, Bk, b_norm):
-        """
-        Perform SVD decomposition of the projected operator and initialize
-        subspace components for regularization parameter selection.
-
-        The projected right-hand side is decomposed into:
-        1. **Head components**: Associated with the $k$ singular values in the
-           current Krylov subspace, representing the regularizable signal.
-        2. **Tail component**: The $(k+1)$-th component representing the
-           residual portion orthogonal to the current subspace, which defines
-           the "noise floor" for the L-curve and Discrepancy Principle.
-
-        Parameters
-        ----------
-        Bk : np.ndarray
-            The $(k+1 \times k)$ projection matrix from the bidiagonalization
-            process.
-        b_norm : float
-            The $L_2$ norm of the initial residual/data vector $b$, used to
-            scale the projected coefficients.
-        """
-        # Ub is (k+1 x k+1), Sb is (k,)
-        Ub, self.Sb, _ = scipy.linalg.svd(Bk)
-
-        # Store squared singular values and extrema
-        self.Sbsq = np.square(self.Sb)
-        self.Sbmax = self.Sb[0]
-        self.Sbmin = self.Sb[-1]
-
-        # Optimization Upper Bound
-        self.regalpha_high = self.Sbmax*100
-
-        # The first row of Ub corresponds to the projection of the
-        # initial residual onto the left singular vectors of Bk.
-        # Head: first k elements; Tail: the (k+1)-th element.
-        self.u1 = Ub[0, :-1]
-        self.u1_tail = Ub[0, -1]
-
-        # Store b_norm
-        self.b_norm = b_norm
 
     def plot_history(self, show_objective=False):
         """
@@ -867,7 +894,7 @@ class UpdateRegGCV(UpdateRegBase):
         filt = 1 / (self.Sbmin + self.Sbsq)
         u1_tail_sq = self.u1_tail * self.u1_tail
         num = (
-            (self.iteration + 1)
+            (self.k + 1)
             * self.Sbmin
             * self.Sbmin
             * np.sum(u1_tail_sq * self.Sbsq * np.power(filt, 3))
@@ -912,7 +939,7 @@ class UpdateRegGCV(UpdateRegBase):
             - omega is the weighting factor
         """
         return (
-            self.iteration
+            self.k
             * self._projected_residual_norm_sq(regalpha)
             / self._weighted_trace(regalpha, 1)
         )
@@ -928,7 +955,7 @@ class UpdateRegGCV(UpdateRegBase):
         return (
             self.n
             * self._projected_residual_norm_sq(regalpha)
-            / self._weighted_trace(regalpha, self.m - self.iteration)
+            / self._weighted_trace(regalpha, self.m - self.k)
         )
 
     def _run_convergence_checks(self):
@@ -961,8 +988,8 @@ class UpdateRegGCV(UpdateRegBase):
                 self.Ghat_history[-1] > self.Ghat_history[-2]
                 and self.Ghat_history[-2] > self.Ghat_history[-3]
             ):
-                self.iteration = np.argmin(self.Ghat_history)
-                self.regalpha = self.regalpha_history[self.iteration]
+                # self.iteration = np.argmin(self.Ghat_history)
+                # self.regalpha = self.regalpha_history[self.iteration]
 
                 log.debug(
                     "The regularisation parameter has converged at outer iteration",
