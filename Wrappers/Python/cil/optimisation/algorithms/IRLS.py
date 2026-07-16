@@ -17,7 +17,8 @@
 # CIL Developers and contributers, listed at: https://github.com/TomographicImaging/CIL/blob/master/NOTICE.txt
 
 from cil.framework import DataContainer
-from cil.optimisation.algorithms import Algorithm
+from cil.optimisation.algorithms import LSQR, CGLS, Algorithm
+from typing import Union
 
 import numpy as np
 import logging
@@ -44,7 +45,7 @@ class IRLS(Algorithm):
 
     def __init__(
         self,
-        inner_solver: Algorithm,
+        inner_solver: Union[LSQR, CGLS],
         tau: float = 1.0,
         tau_factor: float = 0.1,
         max_inner_iterations: int = 50,
@@ -101,20 +102,20 @@ class IRLS(Algorithm):
     def _update_weights(self):
         """
         Calculates and updates the diagonal weight matrix for L1 regularisation.
-        """
-        # Pointer to weights
-        d = self.inner_solver.operator.weights
 
-        # Replace weights with current solution
+        Updates the existing weights container in-place.
+        """
+        d = self.inner_solver.operator.weights
         d.fill(self.inner_solver.x)
 
-        # Calculate new L1 weights: w = (Lx^2 + tau^2)^{-1/4}
+        # d = (|d|^2 + tau^2)^(-1/4)
         d.power(2, out=d)
         d.add(self.tau**2, out=d)
         d.power(-0.25, out=d)
 
-        # Adapt tau for the next outer iteration
         self._adapt_tau()
+
+
 
     def update_objective(self):
         """
