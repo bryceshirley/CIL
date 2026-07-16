@@ -18,7 +18,7 @@
 
 from cil.framework import BlockDataContainer
 from cil.optimisation.algorithms import Algorithm
-from Wrappers.Python.cil.optimisation.operators.TikhonovOperators import BlockTikhonovOperator
+from cil.optimisation.operators.TikhonovOperator import BlockTikhonovOperator
 import numpy
 import logging
 import warnings 

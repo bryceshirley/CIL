@@ -65,7 +65,7 @@ class DiagonalOperator(LinearOperator):
         return self.operator.inverse(x, out=out)
     
     def inverse_adjoint(self, x, out=None):
-        return self.operator.inverse(x, out=out)
+        return self.operator.inverse_adjoint(x, out=out)
 
     def calculate_norm(self, **kwargs):
         r""" Returns the operator norm of DiagonalOperator which is the :math:`\infty` norm of `diagonal`

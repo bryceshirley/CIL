@@ -18,12 +18,44 @@
 
 from cil.framework import DataContainer
 from cil.optimisation.algorithms import LSQR, CGLS, Algorithm
-from typing import Union
+from cil.optimisation.utilities.callbacks import Callback
+from cil.optimisation.operators.TikhonovOperator import HybridTikhonovOperator
+from typing import Union, List, Optional
+from tqdm.auto import tqdm
 
 import numpy as np
 import logging
+import sys
 
 log = logging.getLogger(__name__)
+
+
+class _InnerTQDMCallback(Callback):
+    """Internal callback to link the inner solver's progress to a managed tqdm bar."""
+    def __init__(self, pbar):
+        self.pbar = pbar
+
+    def __call__(self, algorithm):
+        self.pbar.update(1)
+        loss = algorithm.get_last_loss()
+        if isinstance(loss, list):
+            loss = loss[0]
+        if loss is not None and not np.isnan(loss):
+            self.pbar.set_postfix(objective=f"{loss:.3f}")
+
+
+class _OuterTQDMCallback(Callback):
+    """Internal callback for the outer loop to update the tqdm bar."""
+    def __init__(self, pbar):
+        self.pbar = pbar
+
+    def __call__(self, algorithm):
+        self.pbar.update(1)
+        loss = algorithm.get_last_loss()
+        if isinstance(loss, list):
+            loss = loss[0]
+        if loss is not None and not np.isnan(loss):
+            self.pbar.set_postfix(objective=f"{loss:.3f}")
 
 
 class IRLS(Algorithm):
@@ -48,26 +80,10 @@ class IRLS(Algorithm):
         inner_solver: Union[LSQR, CGLS],
         tau: float = 1.0,
         tau_factor: float = 0.1,
-        max_inner_iterations: int = 50,
+        max_inner_iterations: int = 100,
         reset_state: bool = True,
         **kwargs,
     ):
-        """
-        Initialise the IRLS algorithm.
-
-        Parameters
-        ----------
-        inner_solver : Algorithm
-            The underlying least squares algorithm to use (e.g., LSQR, CGLS).
-        tau : float, optional
-            Small positive parameter for L1 regularisation to prevent singularities.
-        tau_factor : float, optional
-            Factor to decrease tau at each outer iteration. Default is 0.1.
-        max_inner_iterations : int, optional
-            Maximum number of inner iterations for the least squares algorithm. Default is 50.
-        reset_state : bool, optional
-            If True, reset the state of the inner solver at each outer iteration. Default is True.
-        """
         super().__init__(**kwargs)
 
         self.inner_solver = inner_solver
@@ -82,6 +98,24 @@ class IRLS(Algorithm):
             
         self.configured = True
 
+    def run(self, iterations: int = None, callbacks: Optional[List[Callback]] = None, verbose: int = 1, **kwargs):
+        """
+        Overrides the base run method to automatically inject a tqdm progress bar 
+        for the outer IRLS iterations, hiding the complexity from the user.
+        """
+        if iterations is None:
+            raise ValueError("`run()` missing number of `iterations`")
+            
+        if callbacks is None:
+            callbacks = []
+
+        with tqdm(total=iterations, desc="Outer Loop", leave=True, dynamic_ncols=True, file=sys.stdout) as outer_pbar:
+            outer_cb = _OuterTQDMCallback(outer_pbar)
+            callbacks.append(outer_cb)
+            
+            # Pass the call up to the CIL Algorithm base class. Force verbose=0 to hide CIL's logs.
+            super().run(iterations, callbacks=callbacks, verbose=0, **kwargs)
+
     def update(self):
         """Perform a single outer IRLS iteration."""
         
@@ -95,18 +129,25 @@ class IRLS(Algorithm):
         # Reset the inner solver
         self.inner_solver.reset_state()
 
-        # Inner Loop: Run the Krylov solver
-        self.inner_solver.run(self.max_inner_iterations)
+        # Inner Loop: Run the Krylov solver with a nested tqdm progress bar
+        with tqdm(total=self.max_inner_iterations, desc="Inner Loop", leave=False, dynamic_ncols=True, file=sys.stdout) as inner_pbar:
+            inner_cb = _InnerTQDMCallback(inner_pbar)
+            self.inner_solver.run(self.max_inner_iterations, callbacks=[inner_cb], verbose=0)
 
 
     def _update_weights(self):
         """
         Calculates and updates the diagonal weight matrix for L1 regularisation.
-
-        Updates the existing weights container in-place.
+        Updates the existing weights container in-place based on the true previous solution.
         """
         d = self.inner_solver.operator.weights
-        d.fill(self.inner_solver.x)
+        op = self.inner_solver.operator
+        
+        if hasattr(op, 'struct_operator'):
+            # Map from solution space to structure space (x_0 = L * u_0)
+            op.struct_operator.direct(self.inner_solver.solution, out=d)
+        else:
+            d.fill(self.inner_solver.solution)
 
         # d = (|d|^2 + tau^2)^(-1/4)
         d.power(2, out=d)
@@ -114,7 +155,6 @@ class IRLS(Algorithm):
         d.power(-0.25, out=d)
 
         self._adapt_tau()
-
 
 
     def update_objective(self):
@@ -133,7 +173,6 @@ class IRLS(Algorithm):
         Reduces by tau_factor until it hits a floor of 1e-8.
         """
         self.tau = max(self.tau * self.tau_factor, 1e-8)
-        log.debug("Tau adapted to: %e", self.tau)
 
     def get_output(self):
         """Returns the final physical solution from the inner solver."""

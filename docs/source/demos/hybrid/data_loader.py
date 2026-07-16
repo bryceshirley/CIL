@@ -19,6 +19,8 @@ import numpy as np
 import os
 import json
 
+DEVICE = 'cpu'
+
 
 def load_and_process_walnut(angle_step: int = 25, 
                             filename: str = "/mnt/share-private/materials/SIRF/Fully3D/CIL/Walnut/valnut_2014-03-21_643_28/tomo-A/valnut_tomo-A.txrm"):
@@ -89,7 +91,7 @@ def load_and_process_walnut(angle_step: int = 25,
     # --- 4. Create Operator ---
     print("Creating ProjectionOperator...")
     try:
-        A = ProjectionOperator(ig3D, ag3D, device="gpu")
+        A = ProjectionOperator(ig3D, ag3D, device=DEVICE)
     except Exception as e:
         raise RuntimeError(f"Failed to create Astra ProjectionOperator. \nError: {e}")
 
@@ -221,7 +223,7 @@ def load_and_process_cylinder(dataset_no: int=5, reduce_size: bool = True,
     print(ac_data)
     return ac_data, ig, ag
 
-def load_and_process_sphere(angle_step: int = 5, single_slice: bool = False):
+def load_and_process_sphere_2D(angle_step: int = 5):
     """
     Loads and preprocesses the sphere dataset.
 
@@ -243,8 +245,6 @@ def load_and_process_sphere(angle_step: int = 5, single_slice: bool = False):
         The ImageGeometry of the dataset.
     ground_truth : ImageData
         The ground truth volume/slice.
-    recon : ImageData
-        The FDK reconstructed volume/slice.
     """
     
     # Load data
@@ -252,39 +252,93 @@ def load_and_process_sphere(angle_step: int = 5, single_slice: bool = False):
     data = dataexample.SIMULATED_CONE_BEAM_DATA.get()
 
     # Conditionally extract a single 2D slice
-    if single_slice:
-        data = data.get_slice(vertical='centre')
-        ground_truth = ground_truth.get_slice(vertical='centre')
+    data = data.get_slice(vertical='centre')
+    ground_truth = ground_truth.get_slice(vertical='centre')
 
     # Convert to absorption and subsample angles
     absorption = TransmissionAbsorptionConverter()(data)
     absorption = Slicer(roi={'angle': (0, -1, angle_step)})(absorption)
     
-    # Reconstruct the initial guess using TIGRE's FDK
-    absorption.reorder('tigre')
-    ig_tigre = ground_truth.geometry
-    recon = FDK(absorption, image_geometry=ig_tigre).run()
-
-    # Reorder data to match Astra toolbox
+    # --- ADD THIS INSTEAD ---
+    # Reorder data to match Astra toolbox directly
     absorption.reorder('astra')
     ground_truth.reorder('astra')
-    recon.reorder('astra')
-    
-    # Grab the updated geometry after reordering
     ig_astra = ground_truth.geometry
 
-    # Visualization
-    if single_slice:
-        show2D([ground_truth, recon], 
-               title=['Ground Truth', 'FDK Reconstruction'], 
-               origin='upper', num_cols=2)
-    else:
-        # If 3D, grab the central slice just for the display plot
-        show2D([ground_truth.get_slice(vertical='centre'), recon.get_slice(vertical='centre')], 
-               title=['Ground Truth (Central Slice)', 'FDK Reconstruction (Central Slice)'], 
-               origin='upper', num_cols=2)
 
-    # Setup Astra Projection Operator
-    A = ProjectionOperator(image_geometry=ig_astra, acquisition_geometry=absorption.geometry)
+    # Setup Astra Projection Operator (Ensure device="cpu" is here!)
+    A = ProjectionOperator(
+        image_geometry=ig_astra, 
+        acquisition_geometry=absorption.geometry,
+        device="cpu"
+    )
     
-    return absorption, A, ig_astra, ground_truth, recon
+    return absorption, A, ig_astra, ground_truth
+
+# def load_and_process_sphere(angle_step: int = 5, single_slice: bool = False):
+#     """
+#     Loads and preprocesses the sphere dataset.
+
+#     Parameters
+#     ----------
+#     angle_step : int, optional
+#         The step size for angular subsampling. Default is 5.
+#     single_slice : bool, optional
+#         If True, extracts and processes only the central 2D slice. 
+#         If False, processes the full 3D volume. Default is False.
+
+#     Returns
+#     -------
+#     absorption : DataContainer
+#         The processed CIL DataContainer (absorption data).
+#     A : ProjectionOperator
+#         The Astra ProjectionOperator corresponding to the data geometry.
+#     ig : ImageGeometry
+#         The ImageGeometry of the dataset.
+#     ground_truth : ImageData
+#         The ground truth volume/slice.
+#     recon : ImageData
+#         The FDK reconstructed volume/slice.
+#     """
+    
+#     # Load data
+#     ground_truth = dataexample.SIMULATED_SPHERE_VOLUME.get()
+#     data = dataexample.SIMULATED_CONE_BEAM_DATA.get()
+
+#     # Conditionally extract a single 2D slice
+#     if single_slice:
+#         data = data.get_slice(vertical='centre')
+#         ground_truth = ground_truth.get_slice(vertical='centre')
+
+#     # Convert to absorption and subsample angles
+#     absorption = TransmissionAbsorptionConverter()(data)
+#     absorption = Slicer(roi={'angle': (0, -1, angle_step)})(absorption)
+    
+#     # Reconstruct the initial guess using TIGRE's FDK
+#     absorption.reorder('tigre')
+#     ig_tigre = ground_truth.geometry
+#     recon = FDK(absorption, image_geometry=ig_tigre).run()
+
+#     # Reorder data to match Astra toolbox
+#     absorption.reorder('astra')
+#     ground_truth.reorder('astra')
+#     recon.reorder('astra')
+    
+#     # Grab the updated geometry after reordering
+#     ig_astra = ground_truth.geometry
+
+#     # Visualization
+#     if single_slice:
+#         show2D([ground_truth, recon], 
+#                title=['Ground Truth', 'FDK Reconstruction'], 
+#                origin='upper', num_cols=2)
+#     else:
+#         # If 3D, grab the central slice just for the display plot
+#         show2D([ground_truth.get_slice(vertical='centre'), recon.get_slice(vertical='centre')], 
+#                title=['Ground Truth (Central Slice)', 'FDK Reconstruction (Central Slice)'], 
+#                origin='upper', num_cols=2)
+
+#     # Setup Astra Projection Operator
+#     A = ProjectionOperator(image_geometry=ig_astra, acquisition_geometry=absorption.geometry, device=DEVICE)
+    
+#     return absorption, A, ig_astra, ground_truth, recon

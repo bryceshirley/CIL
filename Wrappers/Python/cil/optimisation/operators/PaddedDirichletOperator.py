@@ -14,7 +14,7 @@ class PaddedDirichletGradientOperator(LinearOperator):
         
         shape = domain_geometry.shape
         spacing = domain_geometry.spacing
-        padded_shape = tuple(s + 2 * pad_width for s in shape)
+        padded_shape = tuple(s + 2 * self.pad_width for s in shape)
         
         # 1. Create a padded geometry maintaining dimensions AND original spacing
         if len(shape) == 3:
@@ -90,3 +90,4 @@ class PaddedDirichletGradientOperator(LinearOperator):
         
     def calculate_norm(self):
         return self.grad_op.calculate_norm()
+        
