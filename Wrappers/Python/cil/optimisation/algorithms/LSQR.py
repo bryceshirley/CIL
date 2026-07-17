@@ -20,18 +20,15 @@ from cil.optimisation.operators.Operator import Operator
 from cil.framework import DataContainer, BlockDataContainer
 from cil.optimisation.algorithms import Algorithm
 from cil.optimisation.operators.TikhonovOperator import (
-    HybridTikhonovOperator, 
+    HybridTikhonovOperator,
     BlockTikhonovOperator,
-    TikhonovOperator
+    TikhonovOperator,
 )
 from cil.optimisation.utilities.hybrid.BaseHybridRule import BaseHybridRule
 import numpy as np
 import logging
 from typing import Optional
 from tqdm.auto import tqdm
-import sys
-from typing import Optional
-from cil.utilities.display import show2D
 
 log = logging.getLogger(__name__)
 
@@ -40,8 +37,8 @@ class LSQR(Algorithm):
     r"""
     Least Squares with QR factorisation (LSQR) algorithm.
 
-    The LSQR algorithm is used to solve large-scale linear systems and 
-    least-squares problems, particularly when the matrix is sparse or implicitly 
+    The LSQR algorithm is used to solve large-scale linear systems and
+    least-squares problems, particularly when the matrix is sparse or implicitly
     defined.
 
     Solves the standard least-squares problem:
@@ -53,14 +50,14 @@ class LSQR(Algorithm):
     where :math:`A` is a linear operator, :math:`b` is the acquired data, and
     :math:`\alpha` is the regularisation parameter.
 
-    Hybrid regularisation can be applied by providing a `hybrid_rule` that 
-    automatically selects the regularisation parameter :math:`\alpha` at 
+    Hybrid regularisation can be applied by providing a `hybrid_rule` that
+    automatically selects the regularisation parameter :math:`\alpha` at
     each iteration.
 
     We can also have L1, L1-struct regularisation via Tikhonov Operators:
 
-     - If `hybrid_rule` is used, `HybridTikhonovOperator` is used to transform 
-       the problem into standard form: :math:`K = A (WL)^{-1}`, and the penalty 
+     - If `hybrid_rule` is used, `HybridTikhonovOperator` is used to transform
+       the problem into standard form: :math:`K = A (WL)^{-1}`, and the penalty
        is applied via internal scalar damping.
 
      - Otherwise, block structured regularisation `BlockTikhonovOperator` is used
@@ -68,10 +65,10 @@ class LSQR(Algorithm):
        :math:`K = \begin{bmatrix} A \\ \alpha WL \end{bmatrix}`.
 
     where :math:`L` is the structured operator and :math:`W` is the weight operator
-    for Iteratively Reweighted Regularisation. 
+    for Iteratively Reweighted Regularisation.
 
-    We can achieve L1 regularisation by passing the instantiated LSQR algorithm 
-    into the `IRLS` algorithm. 
+    We can achieve L1 regularisation by passing the instantiated LSQR algorithm
+    into the `IRLS` algorithm.
 
     .. math::
         \min_u \|A u - b\|_2^2 + \alpha^2 \|W L u\|_1,
@@ -81,7 +78,7 @@ class LSQR(Algorithm):
     .. math::
         \min_u \|A u - b\|_2^2 + \alpha^2 \|W_k L u\|_2^2,
 
-    where :math:`W_k` is a diagonal weight matrix that is updated at each 
+    where :math:`W_k` is a diagonal weight matrix that is updated at each
     outer iteration.
 
     Reference
@@ -96,7 +93,7 @@ class LSQR(Algorithm):
         initial: Optional[DataContainer] = None,
         regalpha: float = 0.0,
         struct_operator: Optional[Operator] = None,
-        hybrid_rule: Optional[BaseHybridRule] = None
+        hybrid_rule: Optional[BaseHybridRule] = None,
     ):
         """
         Initialise the LSQR algorithm.
@@ -118,7 +115,14 @@ class LSQR(Algorithm):
         """
         super().__init__()
 
-        self.hybrid_rule = hybrid_rule
+        self.hybrid_rule = (
+            hybrid_rule.configure(
+                data_size=data.size,
+                domain_size=int(np.prod(operator.domain_geometry().shape)),
+            )
+            if hybrid_rule
+            else None
+        )
         # Initialise the algorithm
         self.set_up(
             initial=initial,
@@ -138,18 +142,18 @@ class LSQR(Algorithm):
         # 1. Hybrid Rule explicitly requires the Hybrid Operator transformation
         if self.hybrid_rule is not None:
             self.operator = HybridTikhonovOperator(
-            operator=operator,
-            solution_geometry=operator.domain_geometry(),
-            struct_operator=struct_operator
+                operator=operator,
+                solution_geometry=operator.domain_geometry(),
+                struct_operator=struct_operator,
             )
 
         # 2. User passed a struct_operator without hybrid rule
-        elif self.regalpha>0 and struct_operator is not None:
+        elif self.regalpha > 0 and struct_operator is not None:
             self.operator = BlockTikhonovOperator(
-            operator=operator,
-            solution_geometry=operator.domain_geometry(),
-            regalpha=self.regalpha,
-            struct_operator=struct_operator
+                operator=operator,
+                solution_geometry=operator.domain_geometry(),
+                regalpha=self.regalpha,
+                struct_operator=struct_operator,
             )
         else:
             self.operator = TikhonovOperator(
@@ -160,25 +164,24 @@ class LSQR(Algorithm):
         if initial is None:
             initial = operator.domain_geometry().allocate(0)
 
-
         self.data = data
         self.initial = initial
-
-
 
         # 2. Augment data vector if using a block operator
         # Kx returns a block vector, so b must be augmented with a zero block for residuals
         if isinstance(self.operator, BlockTikhonovOperator):
             zero_block = self.operator.range_geometry().geometries[1].allocate(0)
-            self.b = BlockDataContainer(self.data, zero_block) # TODO: Find out if this creates data and if a zero container should be created.
+            self.b = BlockDataContainer(
+                self.data, zero_block
+            )  # TODO: Find out if this creates data and if a zero container should be created.
         else:
             self.b = self.data
 
         # 3. Identify Geometries based on the active operator
-        self.domain_geom_solution = self.operator.domain_geometry()  
-        self.range_geom_data = self.operator.range_geometry()  
+        self.domain_geom_solution = self.operator.domain_geometry()
+        self.range_geom_data = self.operator.range_geometry()
 
-        # 4. Problem sizes 
+        # 4. Problem sizes
         self.domain_size = int(np.prod(self.domain_geom_solution.shape))
         self.data_size = int(np.prod(self.range_geom_data.shape))
 
@@ -189,7 +192,7 @@ class LSQR(Algorithm):
         self.u = self.range_geom_data.allocate(0)
 
         # Temporary Buffers
-        self.tmp_range_data = self.range_geom_data.allocate(0) 
+        self.tmp_range_data = self.range_geom_data.allocate(0)
         self.tmp_domain = self.domain_geom_solution.allocate(0)
 
         # Initialise Golub-Kahan bidiagonalisation (GKB)
@@ -197,8 +200,10 @@ class LSQR(Algorithm):
 
         self.configured = True
         log.info("%s configured", self.__class__.__name__)
-    
-    def _bidiag_update(self, input_vec, target_vec, op_func, shift_vec, scalar, buffer1):
+
+    def _bidiag_update(
+        self, input_vec, target_vec, op_func, shift_vec, scalar, buffer1
+    ):
         """
         Performs: target = (Op(input) - scalar * shift) / norm
         buffer1: Used to store Op(input). Must match Range of Op.
@@ -288,23 +293,23 @@ class LSQR(Algorithm):
         self.v.sapyb(1.0, self.d, -self.d_update_coeff, out=self.d)
 
         if self.hybrid_rule:
-            self.hybrid_rule.update(
-                    alpha=self.alpha, 
-                    beta=self.beta
-                )
-            
+            self.hybrid_rule.update(alpha=self.alpha, beta=self.beta)
+
     def _generate_next_basis_vectors(self):
         """Advances the Golub-Kahan bidiagonalisation by one step."""
         # 1. Update u: u = (Kv - alpha*u) / beta
         self.beta = self._bidiag_update(
-            self.v, self.u, self.operator.direct, self.u, self.alpha, 
-            self.tmp_range_data
+            self.v,
+            self.u,
+            self.operator.direct,
+            self.u,
+            self.alpha,
+            self.tmp_range_data,
         )
 
         # 2. Update v: v = (K*u - beta*v) / alpha
         self.alpha = self._bidiag_update(
-            self.u, self.v, self.operator.adjoint, self.v, self.beta, 
-            self.tmp_domain
+            self.u, self.v, self.operator.adjoint, self.v, self.beta, self.tmp_domain
         )
 
     def update_objective(self):
@@ -318,9 +323,13 @@ class LSQR(Algorithm):
         if self.hybrid_rule:
             if self.hybrid_rule.stopping_state.converged:
                 log.info(
-                    "Hybrid LSQR stopping criterion reached at iteration %d", self.hybrid_rule.stopping_state.iteration
+                    "Hybrid LSQR stopping criterion reached at iteration %d",
+                    self.hybrid_rule.stopping_state.iteration,
                 )
-                log.info("Selected regularisation parameter: %e", self.hybrid_rule.stopping_state.regalpha)
+                log.info(
+                    "Selected regularisation parameter: %e",
+                    self.hybrid_rule.stopping_state.regalpha,
+                )
 
                 raise StopIteration()
 
@@ -328,16 +337,9 @@ class LSQR(Algorithm):
         r"""Returns the physical solution."""
 
         if self.hybrid_rule:
-
             # Retrieve converged parameters
             iteration = self.hybrid_rule.stopping_state.iteration
             self.regalpha = self.hybrid_rule.stopping_state.regalpha
-
-            log.info(
-                "Hybrid LSQR converged at iteration %d with alpha %e.",
-                iteration,
-                self.regalpha,
-            )
 
             stored_rule = self.hybrid_rule
             self.hybrid_rule = None
@@ -355,9 +357,13 @@ class LSQR(Algorithm):
 
             # Restore rule for plotting/history tools
             self.hybrid_rule = stored_rule
-    
-            if isinstance(self.operator, HybridTikhonovOperator):
-                return self.operator.reg_operator.inverse(self.x)
 
-        log.info("Returning standard LSQR solution.")
+            return self.operator.reg_operator.inverse(self.x)  # type: ignore
+
+        if isinstance(self.operator, HybridTikhonovOperator):
+            return self.operator.reg_operator.inverse(self.x)
+
+        if isinstance(self.operator, TikhonovOperator):
+            return self.operator.weight_operator.inverse(self.x)
+
         return self.x

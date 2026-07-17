@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
 
-# Pruned unused imports to keep the namespace clean
 from .maths import KrylovState
 
 log = logging.getLogger(__name__)
@@ -47,8 +46,17 @@ class IterationHistory:
         """Constructs the lower bidiagonal Bk matrix from the current history."""
         k = len(self.gkb_alphas)
         Bk = np.zeros((k + 1, k))
-        np.fill_diagonal(Bk, self.gkb_alphas)
-        np.fill_diagonal(Bk[1:, :], self.gkb_betas[1:])
+
+        # 1. Fill main diagonal with alpha_1 ... alpha_k
+        diag_idx = np.arange(k)
+        Bk[diag_idx, diag_idx] = self.gkb_alphas
+
+        # 2. Fill subdiagonal with beta_2 ... beta_k using explicit indexing
+        if k > 1:
+            subdiag_row_idx = np.arange(1, k)
+            subdiag_col_idx = np.arange(0, k - 1)
+            Bk[subdiag_row_idx, subdiag_col_idx] = self.gkb_betas[1:]
+
         return Bk
 
     @property
@@ -75,18 +83,12 @@ class BaseHybridRule(ABC):
 
     def __init__(
         self,
-        data_size: int,
-        domain_size: int,
-        tol: float = 1e-2,
+        tol: float = 1e-4,
         config: Optional[RuleConfig] = None,
     ):
-        if data_size <= 0 or domain_size <= 0 or tol <= 0:
-            raise ValueError(
-                f"Invalid dimensions or tolerance: data={data_size}, domain={domain_size}, tol={tol}"
-            )
-
+        if tol <= 0:
+            raise ValueError(f"Tolerance must be positive, got {tol}.")
         self.rule_type = "base-rule"
-        self.m, self.n = data_size, domain_size
         self.tol = tol
         self.config = config or RuleConfig()
         self.history = IterationHistory()
@@ -94,13 +96,22 @@ class BaseHybridRule(ABC):
         self.b_norm = 0.0
         self.current_regalpha = 0.0
 
+    def configure(self, data_size: int, domain_size: int) -> "BaseHybridRule":
+        """Configures the rule with the correct problem dimensions."""
+        if data_size <= 0 or domain_size <= 0:
+            raise ValueError(
+                f"Invalid dimensions or tolerance: data={data_size}, domain={domain_size}"
+            )
+        self.m, self.n = data_size, domain_size
+        return self
+
     def reset_state(self, initial_alpha: float, initial_beta: float) -> None:
         """Resets the state for a new solver pass and seeds the initial subspace."""
         self.history = IterationHistory()
         self.history.record_subspace_scalars(initial_alpha, initial_beta)
         self.b_norm = initial_beta
         self.current_regalpha = 0.0
-    
+
     def return_krylov_state(self) -> KrylovState:
         """Returns a KrylovState object built from the current history."""
         Bk = self.history.build_projected_operator()
@@ -108,7 +119,7 @@ class BaseHybridRule(ABC):
 
     def update(self, alpha: float, beta: float) -> StoppingState:
         """Orchestrates a single iteration step."""
-        
+
         # 1. Advance subspace history
         self.history.record_subspace_scalars(alpha, beta)
         state = self.return_krylov_state()
@@ -118,12 +129,12 @@ class BaseHybridRule(ABC):
 
         # 2. Pass strictly typed locals into the optimization method
         new_regalpha = self._calculate_optimal_regalpha(state, lower_bound, upper_bound)
-        
+
         if np.isfinite(new_regalpha):
             # Success: Update state and evaluate objective
             self.current_regalpha = new_regalpha
             obj_val = self.evaluate_objective(new_regalpha, state)
-            
+
             # Safe cast for the objective value
             safe_obj = float(obj_val) if np.isfinite(obj_val) else np.nan
             self.history.record_regularisation_metrics(new_regalpha, safe_obj)
@@ -133,15 +144,24 @@ class BaseHybridRule(ABC):
 
         # 3. Check Convergence and Log
         converged = self._check_convergence()
-        
-        val_str = f"{self.current_regalpha:.4e}" if self.current_regalpha else "N/A"
-        log.info(f"Iteration {state.iteration}: regalpha = {val_str} [{self.rule_type.upper()}]")
+
+        # Explicit check to allow 0.0 to format properly instead of defaulting to N/A
+        val_str = (
+            f"{self.current_regalpha:.4e}"
+            if self.current_regalpha is not None
+            else "N/A"
+        )
+        log.info(
+            f"Iteration {state.iteration}: regalpha = {val_str} [{self.rule_type.upper()}]"
+        )
 
         self.stopping_state = StoppingState(
             converged=converged,
             iteration=state.iteration - 1,
             regalpha=self.current_regalpha,
         )
+
+        return self.stopping_state
 
     def _check_convergence(self) -> bool:
         """Checks if the regularisation parameter has saturated based on tolerance."""
@@ -152,13 +172,15 @@ class BaseHybridRule(ABC):
         denom = abs(self.current_regalpha) + self.config.eps
 
         if (abs(self.current_regalpha - prev) / denom) < self.tol:
-            log.debug(f"Alpha Saturation: Converged with regalpha={self.current_regalpha:.4e}")
+            log.debug(
+                f"Alpha Saturation: Converged with regalpha={self.current_regalpha:.4e}"
+            )
             return True
 
         return False
 
     # -------------------------------------------------------------------------
-    # Abstract Methods - Now completely pure and fully typed!
+    # Abstract Methods
     # -------------------------------------------------------------------------
 
     @abstractmethod
@@ -167,7 +189,7 @@ class BaseHybridRule(ABC):
     ) -> float:
         """Calculates the next optimal regularisation parameter."""
         pass
-    
+
     @abstractmethod
     def evaluate_objective(self, regalpha: float, state: KrylovState) -> float:
         """Evaluates the objective function for a given regalpha."""

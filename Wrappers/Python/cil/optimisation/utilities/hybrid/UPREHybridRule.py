@@ -1,27 +1,27 @@
 import numpy as np
 import scipy.optimize
 
-from .BaseHybridRule import BaseHybridRule
+from .BaseHybridRule import BaseHybridRule, RuleConfig
+from typing import Optional
 from .maths import projected_residual_norm_sq, KrylovState, find_optimal_alpha_via_grid
 
 
 class UPREHybridRule(BaseHybridRule):
     """
     Unbiased Predictive Risk Estimator (UPRE) stopping rule.
-    
-    This rule selects the regularisation parameter by minimizing an unbiased 
-    estimator of the predictive risk. It requires a good estimate of the 
+
+    This rule selects the regularisation parameter by minimizing an unbiased
+    estimator of the predictive risk. It requires a good estimate of the
     data noise variance.
     """
-    
+
     def __init__(
-        self, 
-        data_size: int, 
-        domain_size: int, 
-        tol: float = 1e-2, 
-        noise_variance: float = 0.0
+        self,
+        tol: float = 1e-4,
+        noise_variance: float = 0.0,
+        config: Optional[RuleConfig] = None,
     ):
-        super().__init__(data_size, domain_size, tol)
+        super().__init__(tol, config)
         self.rule_type = "upre"
         self.sigma2 = noise_variance
 
@@ -33,15 +33,12 @@ class UPREHybridRule(BaseHybridRule):
         to find the optimal regularization parameter.
         """
         bounds = (max(lower_bound, self.config.eps), upper_bound)
-        
 
         def bound_objective(alpha: float) -> float:
             return self.evaluate_objective(alpha, state)
 
         search_result = find_optimal_alpha_via_grid(
-            bound_objective, 
-            bounds=bounds,
-            num_points=self.config.default_grid_points
+            bound_objective, bounds=bounds, num_points=self.config.default_grid_points
         )
 
         res = scipy.optimize.minimize(
@@ -49,13 +46,13 @@ class UPREHybridRule(BaseHybridRule):
             x0=search_result.best_alpha,
             args=(state,),
             bounds=[bounds],
-            tol=1e-10
+            tol=1e-10,
         )
-        
+
         # Fallback to the best grid point if continuous minimization fails
         if res.success and np.isfinite(res.x[0]):
             return float(res.x[0])
-            
+
         return float(search_result.best_alpha)
 
     def evaluate_objective(self, regalpha: float, state: KrylovState) -> float:
@@ -76,10 +73,12 @@ class UPREHybridRule(BaseHybridRule):
         """
         # 1. Projected residual norm squared
         r2 = projected_residual_norm_sq(regalpha, state, self.b_norm)
-        
+
         # 2. Trace of the influence matrix
         s2 = state.singular_values_squared
         trace_A = np.sum(s2 / (s2 + regalpha**2))
-        
+
         # 3. Assemble UPRE
-        return float((1.0 / self.m) * r2 + (2.0 * self.sigma2 / self.m) * trace_A - self.sigma2)
+        return float(
+            (1.0 / self.m) * r2 + (2.0 * self.sigma2 / self.m) * trace_A - self.sigma2
+        )

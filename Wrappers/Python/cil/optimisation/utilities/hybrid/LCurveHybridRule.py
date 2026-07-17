@@ -1,7 +1,8 @@
 import numpy as np
 import scipy.optimize
 
-from .BaseHybridRule import BaseHybridRule
+from .BaseHybridRule import BaseHybridRule, RuleConfig
+from typing import Optional
 from .maths import (
     projected_residual_norm_sq,
     projected_solution_norm_sq,
@@ -22,8 +23,8 @@ class LCurveHybridRule(BaseHybridRule):
     between the residual norm and the solution norm.
     """
 
-    def __init__(self, data_size: int, domain_size: int, tol: float = 1e-2):
-        super().__init__(data_size, domain_size, tol)
+    def __init__(self, tol: float = 1e-2, config: Optional[RuleConfig] = None):
+        super().__init__(tol, config)
         self.rule_type = "l-curve"
 
     def _calculate_optimal_regalpha(

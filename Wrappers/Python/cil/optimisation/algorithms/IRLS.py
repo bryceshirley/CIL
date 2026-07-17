@@ -16,10 +16,8 @@
 # Authors:
 # CIL Developers and contributers, listed at: https://github.com/TomographicImaging/CIL/blob/master/NOTICE.txt
 
-from cil.framework import DataContainer
 from cil.optimisation.algorithms import LSQR, CGLS, Algorithm
 from cil.optimisation.utilities.callbacks import Callback
-from cil.optimisation.operators.TikhonovOperator import HybridTikhonovOperator
 from typing import Union, List, Optional
 from tqdm.auto import tqdm
 
@@ -32,6 +30,7 @@ log = logging.getLogger(__name__)
 
 class _InnerTQDMCallback(Callback):
     """Internal callback to link the inner solver's progress to a managed tqdm bar."""
+
     def __init__(self, pbar):
         self.pbar = pbar
 
@@ -46,6 +45,7 @@ class _InnerTQDMCallback(Callback):
 
 class _OuterTQDMCallback(Callback):
     """Internal callback for the outer loop to update the tqdm bar."""
+
     def __init__(self, pbar):
         self.pbar = pbar
 
@@ -61,9 +61,9 @@ class _OuterTQDMCallback(Callback):
 class IRLS(Algorithm):
     r"""
     Iteratively Reweighted Least Squares (IRLS) algorithm for solving L1-regularised problems.
-    
-    This outer algorithm acts as a meta-solver. It manages an inner Krylov subspace 
-    solver (e.g., LSQR or CGLS), iteratively updating a diagonal weight matrix to 
+
+    This outer algorithm acts as a meta-solver. It manages an inner Krylov subspace
+    solver (e.g., LSQR or CGLS), iteratively updating a diagonal weight matrix to
     approximate the L1 norm:
 
     .. math::
@@ -80,60 +80,82 @@ class IRLS(Algorithm):
         inner_solver: Union[LSQR, CGLS],
         tau: float = 1.0,
         tau_factor: float = 0.1,
-        max_inner_iterations: int = 100,
-        reset_state: bool = True,
+        max_inner_iteration: int = 20,
+        reset_state: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
         self.inner_solver = inner_solver
-        self.max_inner_iterations = max_inner_iterations
+        self.max_inner_iteration = max_inner_iteration
         self.reset_state = reset_state
         self.tau = tau
         self.tau_factor = tau_factor
 
-        # Duck typing: Check if the inner solver supports weighted operators
-        if not hasattr(self.inner_solver, 'operator') or not hasattr(self.inner_solver.operator, 'weights'):
-            raise ValueError("The operator of the inner solver must expose a 'weights' setter for IRLS.")
-            
+        if not hasattr(self.inner_solver, "operator") or not hasattr(
+            self.inner_solver.operator, "weights"
+        ):
+            raise ValueError(
+                "The operator of the inner solver must expose a 'weights' setter for IRLS."
+            )
+
         self.configured = True
 
-    def run(self, iterations: int = None, callbacks: Optional[List[Callback]] = None, verbose: int = 1, **kwargs):
+    def run(
+        self,
+        iterations: int = None,
+        callbacks: Optional[List[Callback]] = None,
+        verbose: int = 1,
+        **kwargs,
+    ):
         """
-        Overrides the base run method to automatically inject a tqdm progress bar 
+        Overrides the base run method to automatically inject a tqdm progress bar
         for the outer IRLS iterations, hiding the complexity from the user.
         """
         if iterations is None:
             raise ValueError("`run()` missing number of `iterations`")
-            
+
         if callbacks is None:
             callbacks = []
 
-        with tqdm(total=iterations, desc="Outer Loop", leave=True, dynamic_ncols=True, file=sys.stdout) as outer_pbar:
+        with tqdm(
+            total=iterations,
+            desc="Outer Loop",
+            leave=True,
+            dynamic_ncols=True,
+            file=sys.stdout,
+        ) as outer_pbar:
             outer_cb = _OuterTQDMCallback(outer_pbar)
             callbacks.append(outer_cb)
-            
+
             # Pass the call up to the CIL Algorithm base class. Force verbose=0 to hide CIL's logs.
             super().run(iterations, callbacks=callbacks, verbose=0, **kwargs)
 
     def update(self):
         """Perform a single outer IRLS iteration."""
-        
+
         # Calculate and inject new L1 weights based on the current solution
         self._update_weights()
 
         # Set up the inner solver for the new run
         if not self.reset_state:
             self.inner_solver.initial = self.inner_solver.get_output()
-        
+
         # Reset the inner solver
         self.inner_solver.reset_state()
 
         # Inner Loop: Run the Krylov solver with a nested tqdm progress bar
-        with tqdm(total=self.max_inner_iterations, desc="Inner Loop", leave=False, dynamic_ncols=True, file=sys.stdout) as inner_pbar:
+        with tqdm(
+            total=self.max_inner_iteration,
+            desc="Inner Loop",
+            leave=False,
+            dynamic_ncols=True,
+            file=sys.stdout,
+        ) as inner_pbar:
             inner_cb = _InnerTQDMCallback(inner_pbar)
-            self.inner_solver.run(self.max_inner_iterations, callbacks=[inner_cb], verbose=0)
-
+            self.inner_solver.run(
+                self.max_inner_iteration, callbacks=[inner_cb], verbose=0
+            )
 
     def _update_weights(self):
         """
@@ -142,10 +164,10 @@ class IRLS(Algorithm):
         """
         d = self.inner_solver.operator.weights
         op = self.inner_solver.operator
-        
-        if hasattr(op, 'struct_operator'):
+
+        if hasattr(op, "struct_operator"):
             # Map from solution space to structure space (x_0 = L * u_0)
-            op.struct_operator.direct(self.inner_solver.solution, out=d)
+            op.struct_operator.direct(self.inner_solver.solution, out=d)  # type: ignore
         else:
             d.fill(self.inner_solver.solution)
 
@@ -156,10 +178,9 @@ class IRLS(Algorithm):
 
         self._adapt_tau()
 
-
     def update_objective(self):
         """
-        Update the objective function value. 
+        Update the objective function value.
         Tracks the final residual norm squared from the inner solver's current run.
         """
         if len(self.inner_solver.loss) > 0:
