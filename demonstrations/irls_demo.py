@@ -66,6 +66,31 @@ struct_op_and_regalpha = {
     "Hessian": [get_hessian_op(ig), 15.0],
 }
 
+def plot_solutions(ground_truth, out_lsqr, out_cgls, name, regalpha, results_dir):
+    # ---------------------------------------------------------
+    # Plot Comparison (Ground Truth, LSQR, CGLS)
+    # ---------------------------------------------------------
+    show2D(
+        [ground_truth, out_lsqr, out_cgls],
+        title=[
+            "Ground Truth",
+            f"LSQR\nRegularisation: {name}, alpha: {regalpha:.2e}",
+            f"CGLS\nRegularisation: {name}, alpha: {regalpha:.2e}",
+        ],
+        origin="upper",
+        num_cols=3,
+    )
+
+    # Save the combined output
+    safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
+    filename = os.path.join(results_dir, f"comparison_{safe_name}.png")
+
+    plt.savefig(filename, bbox_inches="tight", dpi=300)
+    print(f"Saved visualization to {filename}")
+
+    # Close the current figure so they don't consume memory across loop iterations
+    plt.close()
+
 # ---------------------------------------------------------
 # Set up a single timestamped results folder
 # ---------------------------------------------------------
@@ -76,6 +101,38 @@ os.makedirs(results_dir, exist_ok=True)
 print("=" * 60)
 print(f"Saving all comparison outputs to directory: {results_dir}")
 print("=" * 60)
+
+print(f"\n--- Evaluating algorithms with no regularisation ---")
+print("Running LSQR...")
+lsqr = LSQR(
+    operator=A,
+    data=data,
+    initial=initial.copy(),  # Pass a fresh copy just to be perfectly safe
+    regalpha=0.0
+)
+t_start = time()
+lsqr.run(maxit*max_inner_iteration, verbose=True)
+t_lsqr = time() - t_start
+print(f"LSQR Time taken: {t_lsqr:.2f} seconds")
+
+out_lsqr = lsqr.get_output()
+
+print("\nRunning CGLS...")
+cgls = CGLS(
+    operator=A,
+    data=data,
+    initial=initial.copy(),
+    regalpha=0.0,
+)
+t_start = time()
+cgls.run(maxit*max_inner_iteration, verbose=True)
+t_cgls = time() - t_start
+print(f"CGLS Time taken: {t_cgls:.2f} seconds")
+
+out_cgls = cgls.get_output()
+
+plot_solutions(ground_truth, out_lsqr, out_cgls, 'None', 0.0, results_dir)
+
 
 # Iterate through the structural operators
 for name, (struct_op, regalpha) in struct_op_and_regalpha.items():
@@ -121,26 +178,4 @@ for name, (struct_op, regalpha) in struct_op_and_regalpha.items():
 
     out_cgls = irls_cgls.get_output()
 
-    # ---------------------------------------------------------
-    # 3. Plot Comparison (Ground Truth, LSQR, CGLS)
-    # ---------------------------------------------------------
-    show2D(
-        [ground_truth, out_lsqr, out_cgls],
-        title=[
-            "Ground Truth",
-            f"LSQR\nRegularisation: {name}, alpha: {regalpha:.2e}",
-            f"CGLS\nRegularisation: {name}, alpha: {regalpha:.2e}",
-        ],
-        origin="upper",
-        num_cols=3,
-    )
-
-    # Save the combined output
-    safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
-    filename = os.path.join(results_dir, f"comparison_{safe_name}.png")
-
-    plt.savefig(filename, bbox_inches="tight", dpi=300)
-    print(f"Saved visualization to {filename}")
-
-    # Close the current figure so they don't consume memory across loop iterations
-    plt.close()
+    plot_solutions(ground_truth, out_lsqr, out_cgls, name, regalpha, results_dir)

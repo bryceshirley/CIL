@@ -126,12 +126,15 @@ class CGLS(Algorithm):
         self.initial = initial
 
         # 1. Setup the mathematical operator based on regularisation
-        self.operator = BlockTikhonovOperator(
-            operator=operator,
-            solution_geometry=operator.domain_geometry(),
-            regalpha=regalpha,
-            struct_operator=struct_operator,
-        )
+        if regalpha > 0.0:
+            self.operator = BlockTikhonovOperator(
+                operator=operator,
+                solution_geometry=operator.domain_geometry(),
+                regalpha=regalpha,
+                struct_operator=struct_operator,
+            )
+        else:
+            self.operator = operator
         self.regalpha = regalpha
 
         # 2. Augment data vector if using the block operator
