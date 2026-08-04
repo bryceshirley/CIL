@@ -17,7 +17,7 @@
 # CIL Developers and contributers, listed at: https://github.com/TomographicImaging/CIL/blob/master/NOTICE.txt
 
 from cil.optimisation.algorithms import LSQR, CGLS, Algorithm
-from cil.optimisation.utilities.callbacks import Callback
+from cil.optimisation.utilities.callbacks import Callback, InnerCallback, OuterCallback
 from typing import Union, List, Optional
 from tqdm.auto import tqdm
 
@@ -28,46 +28,18 @@ import sys
 log = logging.getLogger(__name__)
 
 
-class _InnerTQDMCallback(Callback):
-    """Internal callback to link the inner solver's progress to a managed tqdm bar."""
-
-    def __init__(self, pbar):
-        self.pbar = pbar
-
-    def __call__(self, algorithm):
-        self.pbar.update(1)
-        loss = algorithm.get_last_loss()
-        if isinstance(loss, list):
-            loss = loss[0]
-        if loss is not None and not np.isnan(loss):
-            self.pbar.set_postfix(objective=f"{loss:.3f}")
-
-
-class _OuterTQDMCallback(Callback):
-    """Internal callback for the outer loop to update the tqdm bar."""
-
-    def __init__(self, pbar):
-        self.pbar = pbar
-
-    def __call__(self, algorithm):
-        self.pbar.update(1)
-        loss = algorithm.get_last_loss()
-        if isinstance(loss, list):
-            loss = loss[0]
-        if loss is not None and not np.isnan(loss):
-            self.pbar.set_postfix(objective=f"{loss:.3f}")
-
-
 class IRLS(Algorithm):
     r"""
     Iteratively Reweighted Least Squares (IRLS) algorithm for solving L1-regularised problems.
 
-    This outer algorithm acts as a meta-solver. It manages an inner Krylov subspace
-    solver (e.g., LSQR or CGLS), iteratively updating a diagonal weight matrix to
-    approximate the L1 norm:
+    This outer algorithm acts as a meta-solver. It manages an inner solver (e.g., 
+    LSQR or CGLS), iteratively updating a diagonal weight matrix to approximate 
+    the L1 norm
+
+    ||u||_1 ~ \sum_i w_i |u_i|^2
 
     .. math::
-        w_k = (|L u_{k-1}|^2 + \tau_k^2)^{-1/4}
+        w_k = (|u_{k-1}|^2 + \tau_k^2)^{-1/4}
 
     References
     ----------
@@ -125,7 +97,7 @@ class IRLS(Algorithm):
             dynamic_ncols=True,
             file=sys.stdout,
         ) as outer_pbar:
-            outer_cb = _OuterTQDMCallback(outer_pbar)
+            outer_cb = OuterCallback(outer_pbar)
             callbacks.append(outer_cb)
 
             # Pass the call up to the CIL Algorithm base class. Force verbose=0 to hide CIL's logs.
@@ -152,7 +124,7 @@ class IRLS(Algorithm):
             dynamic_ncols=True,
             file=sys.stdout,
         ) as inner_pbar:
-            inner_cb = _InnerTQDMCallback(inner_pbar)
+            inner_cb = InnerCallback(inner_pbar)
             self.inner_solver.run(
                 self.max_inner_iteration, callbacks=[inner_cb], verbose=0
             )

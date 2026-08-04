@@ -207,3 +207,32 @@ class CGLSEarlyStopping(Callback):
         if algorithm.normx >= self.omega:
             print('The norm of the solution is greater than {} and so the algorithm is terminated'.format(self.omega))
             raise StopIteration
+
+class InnerCallback(Callback):
+    """Internal callback to link the inner solver's progress to a managed tqdm bar."""
+
+    def __init__(self, pbar):
+        self.pbar = pbar
+
+    def __call__(self, algorithm):
+        self.pbar.update(1)
+        loss = algorithm.get_last_loss()
+        if isinstance(loss, list):
+            loss = loss[0]
+        if loss is not None and not np.isnan(loss):
+            self.pbar.set_postfix(objective=f"{loss:.3f}")
+
+
+class OuterCallback(Callback):
+    """Internal callback for the outer loop to update the tqdm bar."""
+
+    def __init__(self, pbar):
+        self.pbar = pbar
+
+    def __call__(self, algorithm):
+        self.pbar.update(1)
+        loss = algorithm.get_last_loss()
+        if isinstance(loss, list):
+            loss = loss[0]
+        if loss is not None and not np.isnan(loss):
+            self.pbar.set_postfix(objective=f"{loss:.3f}")
