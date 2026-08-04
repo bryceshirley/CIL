@@ -1,13 +1,9 @@
 # CIL optimisation algorithms and linear operators
 from cil.optimisation.algorithms import IRLS, LSQR, CGLS
-from data_loader import load_and_process_sphere_2D
+from data_loader import load_and_process_walnut
 from cil.optimisation.operators import (
     WaveletOperator,
     GradientOperator,
-    FiniteDifferenceOperator,
-    MaskOperator,
-    SymmetrisedGradientOperator,
-    CompositionOperator,
 )
 import numpy as np
 
@@ -21,32 +17,9 @@ import os
 from datetime import datetime
 
 
-def get_exterior_mask_operator(ig, radius):
-    """
-    Creates a MaskOperator that applies 1s outside a circle of 'radius',
-    and 0s inside.
-    """
-    shape = ig.shape
-    center_y, center_x = shape[0] // 2, shape[1] // 2
-
-    Y, X = np.ogrid[: shape[0], : shape[1]]
-    dist_from_center = np.sqrt((Y - center_y) ** 2 + (X - center_x) ** 2)
-    mask_array = (dist_from_center > radius).astype(np.float32)
-
-    mask_container = ig.allocate(0)
-    mask_container.fill(mask_array)
-
-    return MaskOperator(mask_container)
-
-
-def get_hessian_op(ig):
-    grad_op = GradientOperator(ig)
-    sym_op = SymmetrisedGradientOperator(grad_op.range_geometry())
-    return CompositionOperator(sym_op, grad_op)
-
 
 # Load data
-data, A, ig, ground_truth = load_and_process_sphere_2D(angle_step=5)
+data, A, ig, fdk = load_and_process_walnut(angle_step = 25)
 
 # Set up Initial
 initial = A.domain_geometry().allocate(0)
@@ -58,29 +31,14 @@ max_inner_iteration = 20
 struct_op_and_regalpha = {
     "L1 Wavelet (Haar)": [WaveletOperator(ig, wavelet="haar"), 1.5],
     "L1 Wavelet (Db4)": [WaveletOperator(ig, wavelet="db4"), 1.5],
-    "Horizontal TV": [FiniteDifferenceOperator(ig, direction=1), 5.0],
-    "Vertical TV": [FiniteDifferenceOperator(ig, direction=0), 5.0],
     "TV": [GradientOperator(ig), 2.5],
     "L1": [None, 1.0],
-    "Masked L1": [get_exterior_mask_operator(ig, radius=55), 3.0],
-    "Hessian": [get_hessian_op(ig), 15.0],
 }
 
-def plot_solutions(ground_truth, out_lsqr, out_cgls, name, regalpha, results_dir):
-    # ---------------------------------------------------------
-    # Plot Comparison (Ground Truth, LSQR, CGLS)
-    # ---------------------------------------------------------
-    show2D(
-        [ground_truth, out_lsqr, out_cgls],
-        title=[
-            "Ground Truth",
-            f"LSQR\nRegularisation: {name}, alpha: {regalpha:.2e}",
-            f"CGLS\nRegularisation: {name}, alpha: {regalpha:.2e}",
-        ],
-        origin="upper",
-        num_cols=3,
-    )
-
+def plot_solutions(out_lsqr, out_cgls, fdk, name, regalpha, results_dir):
+    show2D([out_lsqr.get_slice(vertical='centre'), out_cgls.get_slice(vertical='centre'), fdk.get_slice(vertical='centre')],
+               title=[f'LSQR (Central Slice)\nRegularisation: {name}, alpha: {regalpha:.2e}', f'CGLS (Central Slice)\nRegularisation: {name}, alpha: {regalpha:.2e}', 'FDK (Central Slice)'],
+               origin='upper', num_cols=3)
     # Save the combined output
     safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
     filename = os.path.join(results_dir, f"comparison_{safe_name}.png")
@@ -95,7 +53,7 @@ def plot_solutions(ground_truth, out_lsqr, out_cgls, name, regalpha, results_dir
 # Set up a single timestamped results folder
 # ---------------------------------------------------------
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-results_dir = f"result_irls_{timestamp}"
+results_dir = f"result_irls_walnut_{timestamp}"
 os.makedirs(results_dir, exist_ok=True)
 
 print("=" * 60)
@@ -107,7 +65,7 @@ print("Running LSQR...")
 lsqr = LSQR(
     operator=A,
     data=data,
-    initial=initial.copy(),  # Pass a fresh copy just to be perfectly safe
+    initial=initial.copy(),  
     regalpha=0.0
 )
 t_start = time()
@@ -131,7 +89,7 @@ print(f"CGLS Time taken: {t_cgls:.2f} seconds")
 
 out_cgls = cgls.get_output()
 
-plot_solutions(ground_truth, out_lsqr, out_cgls, 'None', 0.0, results_dir)
+plot_solutions(out_lsqr, out_cgls, fdk, 'None', 0.0, results_dir)
 
 
 # Iterate through the structural operators
@@ -178,4 +136,4 @@ for name, (struct_op, regalpha) in struct_op_and_regalpha.items():
 
     out_cgls = irls_cgls.get_output()
 
-    plot_solutions(ground_truth, out_lsqr, out_cgls, name, regalpha, results_dir)
+    plot_solutions(out_lsqr, out_cgls, fdk, name, regalpha, results_dir)

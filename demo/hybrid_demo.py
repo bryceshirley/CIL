@@ -1,11 +1,16 @@
 # CIL optimisation algorithms and linear operators
-from cil.optimisation.algorithms import LSQR, IRLS
+from numpy import single
+from cil.optimisation.algorithms import IRLS
+from cil.optimisation.algorithms.LSQR_hybrid import LSQR
 from cil.optimisation.utilities.hybrid import (
     ReginskaHybridRule,
+    DiscrepHybridRule,
+    LCurveHybridRule,
+    GCVHybridRule,
     plot_rule_function,
     plot_rule_history,
 )
-from data_loader import load_and_process_sphere_2D
+from data_loader import load_and_process_sphere
 from cil.optimisation.operators import WaveletOperator, PaddedDirichletGradientOperator
 from matplotlib import pyplot as plt
 
@@ -26,15 +31,15 @@ os.makedirs(results_dir, exist_ok=True)
 print(f"Saving all outputs to directory: {results_dir}\n")
 
 # Load data
-data, A, ig, ground_truth = load_and_process_sphere_2D(angle_step=5)
+data, A, ig, ground_truth, fdk = load_and_process_sphere(angle_step=5)
 
 # Set up Initial
 initial = A.domain_geometry().allocate(0)
 
 # We set a tolerance, an initial guess, and a maximum number of iterations
 maxit = 10
-max_inner_iteration = 100
-reset_state = True
+max_inner_iteration = 50
+reset_state = False
 struct_operators = {
     "L1": None,
     "Wavelet": WaveletOperator(ig, wavelet="haar"),
@@ -42,11 +47,8 @@ struct_operators = {
 }
 
 for name, W in struct_operators.items():
-    if name == "TV":
-        mu = 2.0
-    else:
-        mu = 0.5
-    current_rule = ReginskaHybridRule(mu=mu)
+    current_rule = GCVHybridRule()
+
     print(
         f"Running LSQR with {current_rule.rule_type} stopping rule and {name} regularisation..."
     )
@@ -55,7 +57,7 @@ for name, W in struct_operators.items():
         operator=A,
         data=data,
         initial=initial,
-        hybrid_rule=current_rule,
+        regalpha=current_rule,
         struct_operator=W,
     )
     irls = IRLS(
@@ -83,13 +85,14 @@ for name, W in struct_operators.items():
 
     # Use irls.get_output() to get the physical image, not the structure vector!
     show2D(
-        [ground_truth, irls.get_output()],
+        [ground_truth, irls.get_output(), fdk],
         title=[
             "Ground Truth",
             f"{current_rule.rule_type}\n Optimal alpha: {lsqr.regalpha:.2e} Regularisation: {name}",
+            "FDK"
         ],
         origin="upper",
-        num_cols=2,
+        num_cols=3,
     )
 
     # Save the output
