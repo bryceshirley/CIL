@@ -18,7 +18,10 @@
 
 from cil.framework import BlockDataContainer
 from cil.optimisation.algorithms import Algorithm
-from cil.optimisation.operators.TikhonovOperator import BlockTikhonovOperator
+from cil.optimisation.operators.TikhonovOperator import (
+    BlockTikhonovOperator,
+    TikhonovOperator,
+)
 import numpy
 import logging
 import warnings
@@ -57,7 +60,8 @@ class CGLS(Algorithm):
     where :math:`L` is the structured operator and :math:`W` is the weight operator
     for Iteratively Reweighted Least Squares (IRLS).
 
-    This solver can be passed into the `IRLS` outer algorithm to achieve L1 regularisation.
+    If no structured operator is provided (L = I), a standard `TikhonovOperator` is
+    used and the L2 penalty is solved efficiently using native scalar updates.
 
     Parameters
     ------------
@@ -70,7 +74,7 @@ class CGLS(Algorithm):
     regalpha : float, optional
         Non-negative regularisation parameter (:math:`\alpha`). If zero, standard CGLS is used.
     struct_operator : Operator, optional
-        Structured operator for the regularisation (:math:`L`). Default is Identity.
+        Structured operator for the regularisation (:math:`L`). Default is None.
 
     Note
     -----
@@ -124,30 +128,32 @@ class CGLS(Algorithm):
         log.info("%s setting up", self.__class__.__name__)
 
         self.initial = initial
-
-        # 1. Setup the mathematical operator based on regularisation
-        if regalpha > 0.0:
-            self.operator = BlockTikhonovOperator(
-                operator=operator,
-                solution_geometry=operator.domain_geometry(),
-                regalpha=regalpha,
-                struct_operator=struct_operator,
-            )
-        else:
-            self.operator = operator
+        self.data = data
         self.regalpha = regalpha
 
-        # 2. Augment data vector if using the block operator
-        if isinstance(self.operator, BlockTikhonovOperator):
-            zero_block = self.operator.range_geometry().geometries[1].allocate(0)
-            self.b = BlockDataContainer(data, zero_block)
+        # 1. Setup the mathematical operator exactly like LSQR
+        if self.regalpha > 0:
+            if struct_operator is not None:
+                self.operator = BlockTikhonovOperator(
+                    operator=operator,
+                    solution_geometry=operator.domain_geometry(),
+                    regalpha=self.regalpha,
+                    struct_operator=struct_operator,
+            )
+            else:
+                self.operator = TikhonovOperator(
+                    operator=operator,
+                    solution_geometry=operator.domain_geometry(),
+                )
         else:
-            self.b = data
+            self.operator = operator
 
-        # 3. Allocate persistent buffers
+        # 2. Allocate persistent buffers (no augmented zero container needed)
         self.q = self.operator.range_geometry().allocate()
+        self.r = self.operator.range_geometry().allocate(0)
+        self.s = self.operator.domain_geometry().allocate(0)
 
-        # 4. Initialize state
+        # 3. Initialize state
         self.reset_state()
 
         self.configured = True
@@ -157,10 +163,30 @@ class CGLS(Algorithm):
         """
         Resets the Krylov subspace and residuals to start a new CGLS run.
         """
-        self.x = self.initial.copy()
+        # 1. Map initial guess to the correct search space
+        if isinstance(self.operator, TikhonovOperator):
+            # Standard form operates in structure space: x_0 = W * L * u_0
+            # direct() will automatically allocate the correct geometry for self.x
+            self.x = self.operator.reg_operator.direct(self.initial)
+        else:
+            # Block form operates in the physical domain: x_0 = u_0
+            self.x = self.initial.copy()
 
-        self.r = self.b - self.operator.direct(self.x)
-        self.s = self.operator.adjoint(self.r)
+        # Calculate initial residual r = b - Kx efficiently
+        self.operator.direct(self.x, out=self.r)
+        
+        if isinstance(self.operator, BlockTikhonovOperator):
+            self.data.sapyb(1.0, self.r[0], -1.0, out=self.r[0])
+            self.r[1].multiply(-1.0, out=self.r[1])
+        else:
+            self.data.sapyb(1.0, self.r, -1.0, out=self.r)
+
+        # Normal equations residual: s = K^T r
+        self.operator.adjoint(self.r, out=self.s)
+        
+        # Add scalar penalty s = s - alpha^2 x natively for standard Tikhonov
+        if isinstance(self.operator, TikhonovOperator) and self.regalpha > 0:
+            self.s.sapyb(1.0, self.x, -(self.regalpha**2), out=self.s)
 
         self.p = self.s.copy()
 
@@ -175,12 +201,21 @@ class CGLS(Algorithm):
 
         self.operator.direct(self.p, out=self.q)
         delta = self.q.squared_norm()
+        
+        # Include scalar regularization natively
+        if isinstance(self.operator, TikhonovOperator) and self.regalpha > 0:
+            delta += (self.regalpha**2) * self.p.squared_norm()
+            
         alpha = self.gamma / delta
 
         self.x.sapyb(1, self.p, alpha, out=self.x)
         self.r.sapyb(1, self.q, -alpha, out=self.r)
 
         self.operator.adjoint(self.r, out=self.s)
+        
+        # Include scalar regularization natively
+        if isinstance(self.operator, TikhonovOperator) and self.regalpha > 0:
+            self.s.sapyb(1.0, self.x, -(self.regalpha**2), out=self.s)
 
         self.norms = self.s.norm()
         self.gamma1 = self.gamma
@@ -194,6 +229,10 @@ class CGLS(Algorithm):
 
     def update_objective(self):
         a = self.r.squared_norm()
+        
+        if isinstance(self.operator, TikhonovOperator) and self.regalpha > 0:
+            a += (self.regalpha**2) * self.x.squared_norm()
+            
         if a is numpy.nan:
             raise StopIteration()
         self.loss.append(a)
@@ -215,4 +254,6 @@ class CGLS(Algorithm):
 
     def get_output(self):
         """Returns the current physical solution"""
+        if isinstance(self.operator, TikhonovOperator):
+            return self.operator.reg_operator.inverse(self.x)
         return self.x
