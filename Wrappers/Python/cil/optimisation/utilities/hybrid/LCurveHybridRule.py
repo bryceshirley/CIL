@@ -17,10 +17,6 @@ from .maths import (
 class LCurveHybridRule(BaseHybridRule):
     """
     L-Curve stopping rule for iterative solvers.
-
-    This rule selects the regularization parameter by finding the point of
-    maximum curvature on the L-curve, representing the optimal trade-off
-    between the residual norm and the solution norm.
     """
 
     def __init__(self, tol: float = 1e-2, config: Optional[RuleConfig] = None):
@@ -46,10 +42,9 @@ class LCurveHybridRule(BaseHybridRule):
         )
 
         res = scipy.optimize.minimize(
-            self.evaluate_objective,
+            bound_objective,
             x0=search_result.best_alpha,
-            args=(state,),
-            jac=self.evaluate_derivative,
+            jac=bound_derivative,
             bounds=[bounds],
             tol=1e-10,
         )
@@ -59,14 +54,11 @@ class LCurveHybridRule(BaseHybridRule):
         return float(search_result.best_alpha)
 
     def evaluate_objective(self, regalpha: float, state: KrylovState) -> float:
-        r"""
-        Computes the negative curvature of the L-curve in log-log scale.
-        """
-        R2 = projected_residual_norm_sq(regalpha, state, self.b_norm)
-        X2 = projected_solution_norm_sq(regalpha, state, self.b_norm)
-
-        if R2 <= self.config.eps or X2 <= self.config.eps:
-            return 0.0
+        r"""Computes the curvature of the L-curve in log-log scale."""
+        
+        # Smoothly clamp to prevent division by zero without breaking the optimizer
+        R2 = max(projected_residual_norm_sq(regalpha, state, self.b_norm), 1e-30)
+        X2 = max(projected_solution_norm_sq(regalpha, state, self.b_norm), 1e-30)
 
         R2_p, X2_p = projected_norm_first_derivatives(regalpha, state, self.b_norm)
         R2_pp, X2_pp = projected_norm_second_derivatives(regalpha, state, self.b_norm)
@@ -81,14 +73,14 @@ class LCurveHybridRule(BaseHybridRule):
         num = logR_p * logX_pp - logX_p * logR_pp
         denom = (logR_p**2 + logX_p**2) ** 1.5 + 1e-300
 
-        return float(-num / denom)
+        return float(num / denom)
 
     def evaluate_derivative(self, regalpha: float, state: KrylovState) -> float:
-        r"""
-        Evaluates the analytical derivative of the L-curve curvature.
-        """
-        R2 = projected_residual_norm_sq(regalpha, state, self.b_norm)
-        X2 = projected_solution_norm_sq(regalpha, state, self.b_norm)
+        r"""Evaluates the analytical derivative of the L-curve curvature."""
+        
+        # Smoothly clamp to prevent division by zero without breaking the optimizer
+        R2 = max(projected_residual_norm_sq(regalpha, state, self.b_norm), 1e-30)
+        X2 = max(projected_solution_norm_sq(regalpha, state, self.b_norm), 1e-30)
 
         R2_p, X2_p = projected_norm_first_derivatives(regalpha, state, self.b_norm)
         R2_pp, X2_pp = projected_norm_second_derivatives(regalpha, state, self.b_norm)
