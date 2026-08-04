@@ -30,102 +30,6 @@ from cil.optimisation.operators.GradientOperator import GradientOperator
 log = logging.getLogger(__name__)
 
 
-class TikhonovOperator(LinearOperator):
-    r"""
-    Standard-form identity Tikhonov transformation operator.
-
-    This operator represents
-
-    .. math::
-
-        K = A W^{-1},
-
-    where ``W`` is a diagonal weighting operator on the solution space.
-
-    For standard L2 Tikhonov regularisation, ``W`` is the identity.
-    For standard L1 IRLS regularisation, ``W`` is updated externally by IRLS.
-
-    This corresponds to the identity-structure case, i.e. ``L = I``.
-
-    Geometries
-    ----------
-    Domain:
-        Solution space.
-
-    Range:
-        Data space, i.e. ``Range(A)``.
-    """
-
-    def __init__(self, operator, solution_geometry, tmp_domain=None):
-        self.operator = operator
-        self.solution_geometry = solution_geometry
-
-        self.weight_operator = IdentityOperator(
-            domain_geometry=solution_geometry
-        )
-
-        self.tmp_domain = (
-            tmp_domain
-            if tmp_domain is not None
-            else solution_geometry.allocate()
-        )
-
-        super(TikhonovOperator, self).__init__(
-            domain_geometry=solution_geometry,
-            range_geometry=operator.range_geometry(),
-        )
-
-    @property
-    def weights(self):
-        """
-        Return the mutable diagonal weights container.
-
-        If the operator is currently unweighted, initialise explicit unit weights.
-        This allows IRLS to update the weights in-place without allocating a new
-        container each iteration.
-        """
-        if not isinstance(self.weight_operator, DiagonalOperator):
-            weights = self.domain_geometry().allocate(1)
-            self.weight_operator = DiagonalOperator(
-                weights,
-                domain_geometry=self.domain_geometry(),
-            )
-
-        return self.weight_operator.diagonal
-
-    def direct(self, x, out=None):
-        r"""
-        Apply
-
-        .. math::
-
-            K x = A W^{-1} x.
-        """
-        if out is None:
-            out = self.range_geometry().allocate()
-
-        self.weight_operator.inverse(x, out=self.tmp_domain)
-        self.operator.direct(self.tmp_domain, out=out)
-
-        return out
-
-    def adjoint(self, x, out=None):
-        r"""
-        Apply
-
-        .. math::
-
-            K^* x = W^{-*} A^* x.
-        """
-        if out is None:
-            out = self.domain_geometry().allocate()
-
-        self.operator.adjoint(x, out=self.tmp_domain)
-        self.weight_operator.inverse_adjoint(self.tmp_domain, out=out)
-
-        return out
-
-
 class BlockTikhonovOperator(BlockOperator):
     r"""
     Block Tikhonov Operator for general L2 and L1 regularisation.
@@ -200,7 +104,7 @@ class BlockTikhonovOperator(BlockOperator):
         return self.reg_operator.weights
 
 
-class HybridTikhonovOperator(LinearOperator):
+class TikhonovOperator(LinearOperator):
     r"""
     Standard-form transformation operator for Hybrid LSQR.
 
@@ -257,7 +161,7 @@ class HybridTikhonovOperator(LinearOperator):
             else solution_geometry.allocate()
         )
 
-        super(HybridTikhonovOperator, self).__init__(
+        super(TikhonovOperator, self).__init__(
             domain_geometry=hybrid_domain,
             range_geometry=hybrid_range,
         )
@@ -411,61 +315,62 @@ class WeightedStructOperator(LinearOperator):
         self.struct_operator.adjoint(self.tmp_range_struct, out=out)
 
         return out
-
+    
     def inverse(self, x, out=None):
         r"""
-        Return
-
-        .. math::
-
-            L^{-1} W^{-1} x.
-        """
-        if not hasattr(self.struct_operator, "inverse"):
-            raise ValueError(
-                "The structural operator must implement an 'inverse' method."
-            )
+        Return y such that W L y = x.
         
-        if isinstance(self.struct_operator, GradientOperator):
-            if self.struct_operator.operator.bnd_cond != "Dirichlet":
-                raise ValueError(
-                    "WeightedStructOperator requires GradientOperator with "
-                    "Dirichlet boundary conditions due to null-space properties."
-                )
-        self.weight_operator.inverse(x, out=self.tmp_range_struct)
+        If the structural operator is orthogonal (L^{-1} = L^*), we compute 
+        the exact inverse sequentially. Since W is diagonal, W^{-1}x is simply 
+        element-wise division by the weights.
+        """
+        # Fast path: if L is orthogonal, L^{-1} = L^*
+        if hasattr(self.struct_operator, "is_orthogonal") and self.struct_operator.is_orthogonal():
+            # W^{-1} x -> divide by diagonal weights
+            x.divide(self.weights, out=self.tmp_range_struct)
+            
+            if out is None:
+                return self.struct_operator.adjoint(self.tmp_range_struct)
+                
+            self.struct_operator.adjoint(self.tmp_range_struct, out=out)
+            return out
 
-        if out is None:
-            return self.struct_operator.inverse(self.tmp_range_struct)
+        else: # Use commuting approximation: (W L)^{-1} \approx L^{-1} W^{-1}
+            # W^{-1} x -> divide by diagonal weights
+            x.divide(self.weights, out=self.tmp_range_struct)
 
-        self.struct_operator.inverse(self.tmp_range_struct, out=out)
-
-        return out
-
+            if out is None:
+                return self.struct_operator.inverse(self.tmp_range_struct)
+            self.struct_operator.inverse(self.tmp_range_struct, out=out)
+            return out
+    
     def inverse_adjoint(self, x, out=None):
         r"""
-        Return
-
-        .. math::
-
-            W^{-*} L^{-*} x.
-
-        Since ``inverse`` maps ``Range(L)`` to ``Domain(L)``,
-        ``inverse_adjoint`` maps ``Domain(L)`` to ``Range(L)``.
+        Return y such that (W L)^* y = x, which is L^* W^* y = x.
+        
+        If the structural operator is orthogonal (L^{-*} = L), we compute 
+        the exact inverse sequentially. Since W is real and diagonal, W^{-*} 
+        is simply element-wise division by the weights.
         """
-        if not hasattr(self.struct_operator, "inverse_adjoint"):
-            raise ValueError(
-                "The structural operator must implement an 'inverse_adjoint' method."
-            )
-        if isinstance(self.struct_operator, GradientOperator):
-            if self.struct_operator.operator.bnd_cond != "Dirichlet":
-                raise ValueError(
-                    "WeightedStructOperator requires GradientOperator with "
-                    "Dirichlet boundary conditions due to null-space properties."
-                )
+        # Fast path: if L is orthogonal, L^{-*} = L
+        if hasattr(self.struct_operator, "is_orthogonal") and self.struct_operator.is_orthogonal():
+            if out is None:
+                out = self.struct_operator.direct(x)
+            else:
+                self.struct_operator.direct(x, out=out)
+                
+            # W^{-*} (L x) -> divide by diagonal weights
+            out.divide(self.weights, out=out)
+            return out
 
-        if out is None:
-            out = self.range_geometry().allocate()
+        else: # Use commuting approximation: (W L)^{-*} \approx W^{-*} L^{-*}
+            if out is None:
+                out = self.tmp_range_struct
+                self.struct_operator.inverse_adjoint(x, out=self.tmp_range_struct)
+            else:
+                self.struct_operator.inverse_adjoint(x, out=self.tmp_range_struct)
+                out = self.tmp_range_struct
 
-        self.struct_operator.inverse_adjoint(x, out=out)
-        self.weight_operator.inverse_adjoint(out, out=out)
-
-        return out
+            # W^{-*} (L^* x) -> divide by diagonal weights
+            out.divide(self.weights, out=out)
+            return out

@@ -33,5 +33,5 @@ from .BlurringOperator import BlurringOperator
 from .ProjectionMap import ProjectionMap
 from .WaveletOperator import WaveletOperator
 from .PaddedDirichletOperator import PaddedDirichletGradientOperator
-from .TikhonovOperator import TikhonovOperator, BlockTikhonovOperator, HybridTikhonovOperator
+from .TikhonovOperator import TikhonovOperator, BlockTikhonovOperator
 
