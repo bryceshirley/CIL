@@ -81,6 +81,12 @@ class LSQR(Algorithm):
         Non-negative regularisation parameter. If zero, standard LSQR is used.
     struct_operator : Operator, optional
         Structured operator for regularisation.
+    form : {'auto', 'standard', 'block'}, default 'auto'
+        Which formulation of the regularised problem to iterate on. See
+        :func:`~cil.optimisation.operators.TikhonovOperator.create_tikhonov_operator`.
+    weighted : bool, default False
+        Allocate the IRLS weight operator up front, keeping it inside the
+        ``set_up`` budget.
 
     Reference
     ---------
@@ -104,7 +110,7 @@ class LSQR(Algorithm):
             Regularisation parameter. Default is 0 (no regularisation).
         struct_operator : Operator, optional
             Structured operator for regularisation.
-        form : {'auto', 'standard', 'block', 'synthesis'}, default 'auto'
+        form : {'auto', 'standard', 'block'}, default 'auto'
             Which formulation of the regularised problem to iterate on. See
             :func:`~cil.optimisation.operators.TikhonovOperator.create_tikhonov_operator`.
         weighted : bool, default False
@@ -148,7 +154,7 @@ class LSQR(Algorithm):
             Measured data.
         struct_operator : Operator, optional
             Structured operator for regularisation.
-        form : {'auto', 'standard', 'block', 'synthesis'}, default 'auto'
+        form : {'auto', 'standard', 'block'}, default 'auto'
             Which formulation to iterate on.
         weighted : bool, default False
             Allocate the IRLS weight operator up front.
@@ -181,7 +187,7 @@ class LSQR(Algorithm):
         # Allocate 4 domain containers for the LSQR algorithm. In block form the
         # domain is the image space; in standard form it is Range(L), which is
         # not the same space and need not be the same size.
-        self.initial = initial # TODO: check as reset for IRLS requires keeping initial stored
+        self.initial = initial
         self.x = self.operator.domain_geometry().allocate(0)
         self.v = self.operator.domain_geometry().allocate(0)
         self.d = self.operator.domain_geometry().allocate(0)
@@ -273,6 +279,15 @@ class LSQR(Algorithm):
         self.operator.direct(self.v, out=self.tmp_range)
         self.tmp_range.sapyb(1.,  self.u, -self.alpha, out=self.u)
         self.beta = self.u.norm()
+        if self.beta == 0:
+            # Golub-Kahan has terminated: the Krylov subspace is exhausted and
+            # the current iterate is already the exact solution. Dividing here
+            # put inf into u and turned every later iterate into nan, silently,
+            # which is easy to hit -- K = [A; alpha*W] with A and W both
+            # multiples of the identity has K^T K a multiple of the identity,
+            # so LSQR converges in one step and the second breaks down. The
+            # guard on alpha below is the same case on the other factor.
+            raise StopIteration
         self.u /= self.beta
 
         # Update v in GKB
@@ -301,6 +316,10 @@ class LSQR(Algorithm):
 
         # Eliminate lower bidiagonal part
         rho = math.sqrt(rhobar1 ** 2 + self.beta ** 2)
+        if rho == 0:
+            # Both the bidiagonal and the eliminated diagonal have collapsed;
+            # there is no step left to take.
+            raise StopIteration
         c = rhobar1 / rho
         s = self.beta / rho
         theta = s * self.alpha
