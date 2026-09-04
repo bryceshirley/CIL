@@ -1,3 +1,14 @@
+* XX.X.X
+  - New features:
+    - `IRLS` iteratively reweighted least squares algorithm added to the CIL algorithm class, solving `||Ax-b||^2 + alpha^2 ||Lx||_1` by a sequence of reweighted least squares problems
+    - `IRLSEarlyStopping` callback added, stopping the outer loop on the relative change in the iterate
+    - `TikhonovOperator`, `BlockTikhonovOperator`, `WeightedStructOperator` and `BlockDiagonalOperator` added to the operators, with a `create_tikhonov_operator` factory
+  - Enhancements:
+    - `LSQR` and `CGLS` accept a regularisation operator built by `create_tikhonov_operator`, in either block form `[A; alpha*L]` or standard form `A*L^-1`
+  - Bug fixes:
+    - `LSQR` no longer returns `nan` from every subsequent iteration when the bidiagonalisation breaks down on exact convergence
+    - the `tqdm` progress bar no longer renders twice per iteration
+
 * 26.0.0
   - New features:
     - `LSQR` algorithm added to the CIL algorithm class (#1975)
