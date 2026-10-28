@@ -2328,13 +2328,14 @@ class TestIRLS(CCPiTestClass):
                  alpha=self.alpha, inner_solver=instance,
                  max_inner_iteration=2)
 
-        # the standard form needs (WL)^-1 and the gradient has no inverse
+        # the standard form needs (WL)^-1 and backward differences have
+        # no inverse
         ig = ImageGeometry(8, 8)
         with self.assertRaises(ValueError):
             IRLS(initial=ig.allocate(0), operator=IdentityOperator(ig),
                  data=ig.allocate('random', seed=41), alpha=self.alpha,
-                 struct_operator=GradientOperator(ig), form='standard',
-                 max_inner_iteration=2)
+                 struct_operator=GradientOperator(ig, method='backward'),
+                 form='standard', max_inner_iteration=2)
 
         # operator and data are both required
         with self.assertRaises(ValueError):

@@ -18,7 +18,8 @@
 
 import numpy
 
-from cil.framework import ImageGeometry
+from cil.framework import ImageGeometry, VectorGeometry
+from cil.optimisation.algorithms import CGLS, LSQR
 from cil.optimisation.operators import (BlockOperator, DiagonalOperator,
                                         GradientOperator, IdentityOperator,
                                         LinearOperator, WaveletOperator)
@@ -37,6 +38,29 @@ def weighted(L, ig, seed):
     struct.set_weights(
         struct.range_geometry().allocate('random', seed=seed).abs() + 0.5)
     return struct
+
+
+class InvertibleScaling(LinearOperator):
+    # a non-orthogonal L carrying its own inverse/inverse_adjoint pair
+
+    def __init__(self, ig, seed):
+        super().__init__(domain_geometry=ig, range_geometry=ig)
+        self.scale = ig.allocate('random', seed=seed) + 0.5
+
+    def direct(self, x, out=None):
+        return x.multiply(self.scale, out=out)
+
+    def adjoint(self, x, out=None):
+        return x.multiply(self.scale, out=out)
+
+    def has_inverse(self):
+        return True
+
+    def inverse(self, x, out=None):
+        return x.divide(self.scale, out=out)
+
+    def inverse_adjoint(self, x, out=None):
+        return x.divide(self.scale, out=out)
 
 
 class TestTikhonovOperator(CCPiTestClass):
@@ -152,7 +176,9 @@ class TestTikhonovOperator(CCPiTestClass):
 
     def test_rejects_non_invertible_L(self):
         # the check fires where the inverse is formed: on the first apply
-        op = TikhonovOperator(self.A, self.ig, struct_operator=self.grad,
+        op = TikhonovOperator(self.A, self.ig,
+                              struct_operator=GradientOperator(
+                                  self.ig, method='backward'),
                               regalpha=self.alpha)
         with self.assertRaises(ValueError) as ctx:
             op.direct(op.domain_geometry().allocate(0))
@@ -179,6 +205,26 @@ class TestTikhonovOperator(CCPiTestClass):
         self.assertNumpyArrayAlmostEqual(K.direct(z).as_array(),
                                          self.A.direct(u).as_array(),
                                          decimal=4)
+
+    def test_admits_an_L_with_its_own_inverse(self):
+        L = InvertibleScaling(self.ig, seed=67)
+        for struct in (L, weighted(L, self.ig, seed=65)):
+            K = TikhonovOperator(self.A, self.ig, struct_operator=struct,
+                                 regalpha=self.alpha)
+            u = self.ig.allocate('random', seed=66)
+            z = K.map_from_solution(u)
+            self.assertNumpyArrayAlmostEqual(K.direct(z).as_array(),
+                                             self.A.direct(u).as_array(),
+                                             decimal=4)
+        # no null space: nothing is deflated and L^-1 is applied as given
+        K = TikhonovOperator(self.A, self.ig, struct_operator=L,
+                             regalpha=self.alpha)
+        b = self.A.range_geometry().allocate('random', seed=68)
+        self.assertNumpyArrayAlmostEqual(K._deflate(b).as_array(),
+                                         b.as_array())
+        x = K.domain_geometry().allocate('random', seed=69)
+        self.assertNumpyArrayAlmostEqual(
+            K.map_to_solution(x).as_array(), L.inverse(x).as_array())
 
     def test_norm(self):
         # K = A(WL)^-1 with WL = I is A whatever alpha is: in standard form
@@ -337,3 +383,87 @@ class TestBlockTikhonovOperator(CCPiTestClass):
                                       regalpha=alpha)
             expected = self.A.norm() ** 2 + alpha ** 2
             self.assertAlmostEqual(expected, K.norm() ** 2, places=4)
+
+
+class DenseOperator(LinearOperator):
+    # a dense matrix acting on a flattened image
+
+    def __init__(self, matrix, ig):
+        self.matrix = matrix
+        super().__init__(domain_geometry=ig,
+                         range_geometry=VectorGeometry(matrix.shape[0],
+                                                       dtype=ig.dtype))
+
+    def direct(self, x, out=None):
+        if out is None:
+            out = self.range_geometry().allocate(None)
+        out.fill(self.matrix @ x.as_array().ravel())
+        return out
+
+    def adjoint(self, x, out=None):
+        if out is None:
+            out = self.domain_geometry().allocate(None)
+        out.fill((self.matrix.T @ x.as_array()).reshape(
+            self.domain_geometry().shape))
+        return out
+
+
+class TestNullSpaceDeflation(CCPiTestClass):
+    # standard form with an L whose null space is not empty: K = P A L^+
+
+    def setUp(self):
+        self.ig = ImageGeometry(7, 6, dtype=numpy.float64)
+        rng = numpy.random.RandomState(0)
+        # an A that sees the constants
+        self.matrix = rng.randn(30, 42) + 2.0
+        self.A = DenseOperator(self.matrix, self.ig)
+        self.b = self.A.range_geometry().allocate(None)
+        self.b.fill(self.matrix @ (rng.rand(42) + 3.0)
+                    + 0.1 * rng.randn(30))
+        self.alpha = 0.7
+
+    def dense_gradient(self, G):
+        columns = []
+        size = int(numpy.prod(self.ig.shape))
+        for i in range(size):
+            e = numpy.zeros(size)
+            e[i] = 1
+            image = self.ig.allocate(None)
+            image.fill(e.reshape(self.ig.shape))
+            columns.append(numpy.concatenate(
+                [g.as_array().ravel() for g in G.direct(image).containers]))
+        return numpy.column_stack(columns)
+
+    def test_standard_form_matches_the_dense_tikhonov_solution(self):
+        for bnd_cond in ('Neumann', 'Periodic'):
+            G = GradientOperator(self.ig, bnd_cond=bnd_cond, backend='numpy')
+            D = self.dense_gradient(G)
+            expected = numpy.linalg.solve(
+                self.matrix.T @ self.matrix + self.alpha ** 2 * D.T @ D,
+                self.matrix.T @ self.b.as_array())
+            for solver in (LSQR, CGLS):
+                with self.subTest(bnd_cond=bnd_cond, solver=solver.__name__):
+                    algorithm = solver(operator=self.A, data=self.b,
+                                       alpha=self.alpha, struct_operator=G,
+                                       form='standard')
+                    algorithm.run(300, verbose=0)
+                    numpy.testing.assert_allclose(
+                        algorithm.get_output().as_array().ravel(), expected,
+                        rtol=1e-6)
+
+    def test_deflated_operator(self):
+        G = GradientOperator(self.ig, bnd_cond='Periodic', backend='numpy')
+        K = TikhonovOperator(self.A, self.ig, struct_operator=G,
+                             regalpha=self.alpha)
+        self.assertTrue(LinearOperator.dot_test(K, decimal=4))
+        # the range of K is orthogonal to A N
+        a = self.A.direct(G.null_space()[0])
+        x = K.domain_geometry().allocate('random', seed=1)
+        self.assertAlmostEqual(K.direct(x).dot(a), 0.0, places=8)
+        # deflate is the projector
+        y = K._deflate(self.b)
+        self.assertAlmostEqual(y.dot(a), 0.0, places=8)
+        self.assertNumpyArrayAlmostEqual(K._deflate(y).as_array(),
+                                         y.as_array())
+        with self.assertRaises(ValueError):
+            K.map_to_solution(x)

@@ -344,8 +344,9 @@ class TestOperator(CCPiTestClass):
                                          expected.as_array(), decimal=5)
 
         # (WL)^-1 is formed as L^* W^-1, which for a non-orthogonal L is
-        # simply a different operator, so it must refuse
-        op = WeightedOperator(ig, operator=GradientOperator(ig))
+        # simply a different operator, so it must refuse; backward
+        # differences carry no inverse of their own
+        op = WeightedOperator(ig, operator=GradientOperator(ig, method='backward'))
         with self.assertRaises(ValueError):
             op.inverse(op.range_geometry().allocate(0))
         with self.assertRaises(ValueError):
@@ -358,6 +359,8 @@ class TestOperator(CCPiTestClass):
         self.assertTrue(WeightedOperator(
             ig, operator=IdentityOperator(ig)).is_invertible())
         self.assertFalse(WeightedOperator(
+            ig, operator=GradientOperator(ig, method='backward')).is_invertible())
+        self.assertTrue(WeightedOperator(
             ig, operator=GradientOperator(ig)).is_invertible())
 
         # a padded wavelet reports is_orthogonal() == True but is a tall
@@ -888,6 +891,51 @@ class TestGradients(CCPiTestClass):
         # self.assertAlmostEqual(lhs3, rhs3)
         # self.assertTrue( LinearOperator.dot_test(Grad3 , verbose=True))
         self.assertTrue( LinearOperator.dot_test(Grad3 , decimal=4, verbose=True))
+
+
+
+class TestSpectralGradient(CCPiTestClass):
+    # the spectral inverses of forward differences
+
+    def setUp(self):
+        self.geometries = [
+            (ImageGeometry(12, 10, voxel_size_x=0.5, voxel_size_y=2.0), {}),
+            (ImageGeometry(8, 6, 5), {}),
+            (ImageGeometry(12, 10, dtype=numpy.float64), {'backend': 'numpy'}),
+            (ImageGeometry(9, 7, channels=3), {}),
+            (ImageGeometry(9, 7, channels=3),
+             {'correlation': GradientOperator.CORRELATION_SPACECHANNEL}),
+        ]
+
+    def test_inverse(self):
+        for bnd_cond in ('Neumann', 'Periodic'):
+            for ig, kwargs in self.geometries:
+                G = GradientOperator(ig, bnd_cond=bnd_cond, **kwargs)
+                basis = G.null_space()
+                channelwise = ('channel' in ig.dimension_labels
+                               and kwargs.get('correlation') is None)
+                self.assertEqual(len(basis),
+                                 ig.channels if channelwise else 1)
+                u = ig.allocate('random', seed=3)
+                for n in basis:
+                    self.assertAlmostEqual(G.direct(n).norm(), 0.0, places=5)
+                    u.sapyb(1.0, n, -n.dot(u) / n.dot(n), out=u)
+                self.assertNumpyArrayAlmostEqual(
+                    G.inverse(G.direct(u)).as_array(), u.as_array(),
+                    decimal=4)
+                # inverse_adjoint is the adjoint of inverse
+                y = G.range_geometry().allocate('random', seed=4)
+                x = ig.allocate('random', seed=5)
+                lhs = G.inverse(y).dot(x)
+                rhs = y.dot(G.inverse_adjoint(x))
+                self.assertAlmostEqual(lhs / rhs, 1.0, places=4)
+
+    def test_no_inverse_elsewhere(self):
+        G = GradientOperator(self.geometries[0][0], method='backward')
+        self.assertFalse(G.has_inverse())
+        self.assertEqual(G.null_space(), [])
+        with self.assertRaises(NotImplementedError):
+            G.inverse(G.range_geometry().allocate(0))
 
 
 class TestOperatorCompositionSum(unittest.TestCase):

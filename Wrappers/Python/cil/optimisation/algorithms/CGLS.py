@@ -67,7 +67,7 @@ class CGLS(Algorithm):
     * ``form='standard'`` changes variables to :math:`z = Lx` and iterates on
       :math:`K = A L^{-1}`, with the :math:`\alpha^2 x` term subtracted
       explicitly in the recurrence. It is less memory expensive than the block form 
-      but requires an orthogonal, square :math:`L`.
+      but requires an invertible :math:`L`.
 
 
     Parameters
@@ -198,6 +198,9 @@ class CGLS(Algorithm):
         else:
             # Standard single container form: r = data - operator * x
             self.data.sapyb(1.0, self.r, -1.0, out=self.r)
+            if self.standard_form:
+                # fit P b: the part of b outside Range(K) is not residual
+                self.operator._deflate(self.r, out=self.r)
 
         # Normal equations residual: s = operator^* r
         self.operator.adjoint(self.r, out=self.s)
@@ -271,7 +274,8 @@ class CGLS(Algorithm):
             Current estimate of the solution.
         """
         if self.standard_form:
-            return self.operator.map_to_solution(self.x, out=out)
+            return self.operator.map_to_solution(self.x, out=out,
+                                                 data=self.data)
 
         if out is not None:
             out.fill(self.x)

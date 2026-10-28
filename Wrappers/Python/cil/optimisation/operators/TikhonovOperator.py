@@ -19,6 +19,8 @@
 
 import logging
 
+import numpy as np
+
 from cil.optimisation.operators import (
     LinearOperator,
     IdentityOperator,
@@ -26,6 +28,7 @@ from cil.optimisation.operators import (
     ScaledOperator,
     WeightedOperator,
 )
+from cil.optimisation.operators.WeightedOperator import _has_own_inverse
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ def _build_tikhonov_operator(operator, struct_operator=None, regalpha=0.0,
         'block' builds :math:`K = [A;\ \alpha L]` (`BlockTikhonovOperator`),
         which accepts any :math:`L` and warm starts; 'standard' builds
         :math:`K = A L^{-1}` (`TikhonovOperator`), which is cheaper but needs
-        an orthogonal, square :math:`L`, and LSQR cannot warm start in it.
+        an invertible :math:`L`, and LSQR cannot warm start in it.
     solution_geometry: cil geometry, default None
         The physical solution space. Defaults to ``operator.domain_geometry()``.
 
@@ -185,6 +188,12 @@ class TikhonovOperator(LinearOperator):
     ``inverse`` instead. LSQR cannot warm start in this form: the penalty
     lands on the step, not the solution.
 
+    An :math:`L` with a non-empty ``null_space()``, such as a ``GradientOperator``,
+    is handled by deflation: with :math:`N` spanning the null space and :math:`P`
+    the orthogonal projector onto the complement of :math:`\mathrm{Range}(AN)`,
+    the solver iterates on :math:`K = P A L^+` against :math:`P b`, and
+    :meth:`map_to_solution` adds back the null-space component that best fits the data.
+
     Parameters
     ----------
     operator: `LinearOperator`
@@ -225,16 +234,29 @@ class TikhonovOperator(LinearOperator):
             tmp_domain = solution_geometry.allocate(0)
         self.tmp_domain = tmp_domain
 
+        # The null space of WL is that of L; deflate A along its image
+        plain = (struct_operator.operator if self._weighted_operator is not None
+                 else struct_operator)
+        self._null_basis = (plain.null_space() if hasattr(plain, 'null_space')
+                            else [])
+        self._null_images = [operator.direct(n) for n in self._null_basis]
+        self._null_gram = np.array([[float(a.dot(b)) for b in self._null_images]
+                                    for a in self._null_images])
+        self.tmp_range = (operator.range_geometry().allocate(0)
+                          if self._null_basis else None)
+
         super(TikhonovOperator, self).__init__(
             domain_geometry=struct_operator.range_geometry(),
             range_geometry=operator.range_geometry(),
         )
 
     def _inverse(self, x, out=None):
-        r"""Apply :math:`L^{-1}`: the weighted wrapper's true inverse, or
-        :math:`L^*` for a plain L, which must be orthogonal and square."""
+        r"""Apply :math:`L^{-1}`: the weighted wrapper's or the operator's own
+        inverse, else :math:`L^*` for a plain orthogonal, square L."""
         if self._weighted_operator is not None:
             return self._weighted_operator.inverse(x, out=out)
+        if _has_own_inverse(self.struct_operator):
+            return self.struct_operator.inverse(x, out=out)
         WeightedOperator._require_invertible(self.struct_operator)
         return self.struct_operator.adjoint(x, out=out)
 
@@ -244,6 +266,8 @@ class TikhonovOperator(LinearOperator):
         orthogonal square L."""
         if self._weighted_operator is not None:
             return self._weighted_operator.inverse_adjoint(x, out=out)
+        if _has_own_inverse(self.struct_operator):
+            return self.struct_operator.inverse_adjoint(x, out=out)
         WeightedOperator._require_invertible(self.struct_operator)
         return self.struct_operator.direct(x, out=out)
 
@@ -255,12 +279,43 @@ class TikhonovOperator(LinearOperator):
         r"""Map a physical solution into the iterate space: :math:`x = L u`."""
         return self.struct_operator.direct(u, out=out)
 
-    def map_to_solution(self, x, out=None):
-        r"""Map an iterate back to the physical solution: :math:`u = L^{-1} x`."""
-        return self._inverse(x, out=out)
+    def map_to_solution(self, x, out=None, data=None):
+        r"""Map an iterate back to the physical solution: :math:`u = L^{-1} x`.
+        When :math:`L` has a null space, the component in it that best fits
+        ``data`` is added, so ``data`` is then required."""
+        out = self._inverse(x, out=out)
+        if not self._null_basis:
+            return out
+        if data is None:
+            raise ValueError(
+                "struct_operator has a null space: pass the data to "
+                "map_to_solution to recover the component of u in it.")
+        self.operator.direct(out, out=self.tmp_range)
+        self.tmp_range.sapyb(-1.0, data, 1.0, out=self.tmp_range)
+        for n, c in zip(self._null_basis,
+                        self._null_coefficients(self.tmp_range)):
+            out.sapyb(1.0, n, c, out=out)
+        return out
+
+    def _null_coefficients(self, y):
+        """The coefficients of the least-squares fit of y by A N."""
+        return np.linalg.solve(self._null_gram,
+                               [float(a.dot(y)) for a in self._null_images])
+
+    def _deflate(self, y, out=None):
+        r"""Apply :math:`P`, removing from ``y`` its least-squares fit by
+        :math:`A N`; the identity when :math:`L` has no null space."""
+        if out is None:
+            out = y.copy()
+        elif out is not y:
+            out.fill(y)
+        if self._null_basis:
+            for a, c in zip(self._null_images, self._null_coefficients(y)):
+                out.sapyb(1.0, a, -c, out=out)
+        return out
 
     def direct(self, x, out=None):
-        r"""Apply :math:`K x = A L^{-1} x`."""
+        r"""Apply :math:`K x = P A L^{-1} x`."""
         if out is None:
             out = self.range_geometry().allocate(0)
 
@@ -269,15 +324,19 @@ class TikhonovOperator(LinearOperator):
             return self.operator.direct(x, out=out)
 
         self._inverse(x, out=self.tmp_domain)
-        return self.operator.direct(self.tmp_domain, out=out)
+        self.operator.direct(self.tmp_domain, out=out)
+        return self._deflate(out, out=out)
 
     def adjoint(self, x, out=None):
-        r"""Apply :math:`K^* x = L^{-*} A^* x`."""
+        r"""Apply :math:`K^* x = L^{-*} A^* P x`."""
         if out is None:
             out = self.domain_geometry().allocate(0)
 
         if self.tmp_domain is None:
             return self.operator.adjoint(x, out=out)
+
+        if self._null_basis:
+            x = self._deflate(x, out=self.tmp_range)
 
         self.operator.adjoint(x, out=self.tmp_domain)
         return self._inverse_adjoint(self.tmp_domain, out=out)

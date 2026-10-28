@@ -24,6 +24,11 @@ from cil.optimisation.operators import (
 )
 
 
+def _has_own_inverse(operator):
+    """True when ``operator.has_inverse()`` reports its own inverse pair."""
+    return getattr(operator, 'has_inverse', lambda: False)()
+
+
 class WeightedOperator(LinearOperator):
     r"""
     Composes an operator :math:`L` with a mutable diagonal weight operator :math:`W` 
@@ -154,8 +159,9 @@ class WeightedOperator(LinearOperator):
         return self.operator.adjoint(self.tmp_range, out=out)
 
     def inverse(self, x, out=None):
-        r"""Returns :math:`y` such that :math:`W L y = x`, as :math:`L^* W^{-1} x`.
-        Requires an orthogonal, square :math:`L` and strictly positive weights.
+        r"""Returns :math:`y` such that :math:`W L y = x`, as :math:`L^{-1} W^{-1} x`.
+        Requires an invertible :math:`L` (orthogonal and square, or carrying
+        its own ``inverse``) and strictly positive weights.
 
         Parameters
         ----------
@@ -180,11 +186,14 @@ class WeightedOperator(LinearOperator):
             return out
 
         x.divide(self.weights, out=self.tmp_range)
+        if _has_own_inverse(self.operator):
+            return self.operator.inverse(self.tmp_range, out=out)
         return self.operator.adjoint(self.tmp_range, out=out)
 
     def inverse_adjoint(self, x, out=None):
-        r"""Returns :math:`y` such that :math:`(W L)^* y = x`, as :math:`W^{-1} L x`.
-        Requires an orthogonal, square :math:`L` and strictly positive weights.
+        r"""Returns :math:`y` such that :math:`(W L)^* y = x`, as :math:`W^{-1} L^{-*} x`.
+        Requires an invertible :math:`L` (orthogonal and square, or carrying
+        its own ``inverse_adjoint``) and strictly positive weights.
 
         Parameters
         ----------
@@ -203,29 +212,35 @@ class WeightedOperator(LinearOperator):
         if out is None:
             out = self.range_geometry().allocate(0)
 
-        self.operator.direct(x, out=out)
+        if _has_own_inverse(self.operator):
+            self.operator.inverse_adjoint(x, out=out)
+        else:
+            self.operator.direct(x, out=out)
         out.divide(self.weights, out=out)
 
         return out
     
     @staticmethod
     def _require_invertible(operator):
-        r"""Raises unless the operator's inverse exists and equals its
-        adjoint: orthogonal *and* square. Orthogonality alone is not enough:
+        r"""Raises unless the operator has its own inverse, or its inverse exists
+        and equals its adjoint: orthogonal *and* square. Orthogonality alone is not enough:
         a padding ``WaveletOperator`` is a tall isometry (:math:`L^*L = I`
         but :math:`LL^* \neq I`)."""
+        if _has_own_inverse(operator):
+            return
         if (operator.is_orthogonal()
                 and operator.domain_geometry().shape
                 == operator.range_geometry().shape):
             return
         raise ValueError(
             "Forming L^-1 requires an orthogonal, square L, so that "
-            "L^-1 = L^*, and {} is not. If using IRLS use form='block', "
+            "L^-1 = L^*, or an L with its own inverse/inverse_adjoint pair, "
+            "and {} is neither. If using IRLS use form='block', "
             "which never forms an inverse.".format(type(operator).__name__))
 
     def is_invertible(self):
         r"""Returns True when :meth:`inverse` and :meth:`inverse_adjoint` can
-        be used: :math:`L` is orthogonal and square."""
+        be used: :math:`L` is orthogonal and square, or has its own inverse."""
         try:
             self._require_invertible(self.operator)
         except ValueError:

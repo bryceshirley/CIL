@@ -64,7 +64,7 @@ class LSQR(Algorithm):
       :math:`K = A L^{-1}`, with :math:`\alpha` folded into LSQR's own scalar
       recurrence. It is cheaper -- no stacked containers, and for :math:`L = I`
       it costs the same as an unregularised solve -- but it requires an
-      orthogonal, square :math:`L`, and LSQR cannot warm start in it: the
+      invertible :math:`L`, and LSQR cannot warm start in it: the
       penalty lands on the step rather than the solution, see the note below.
 
     Parameters
@@ -254,6 +254,9 @@ class LSQR(Algorithm):
         else:
             # Standard single container form: u = data - A * x
             self.data.sapyb(1.0, self.u, -1.0, out=self.u)
+            if self.standard_form:
+                # fit P b: the part of b outside Range(K) is not residual
+                self.operator._deflate(self.u, out=self.u)
         self.beta = self.u.norm()
         if self.beta > 0:
             # Reachable under IRLS: a converged warm start has zero residual.
@@ -354,7 +357,8 @@ class LSQR(Algorithm):
             iterate, not a copy.
         """
         if self.standard_form:
-            return self.operator.map_to_solution(self.x, out=out)
+            return self.operator.map_to_solution(self.x, out=out,
+                                                 data=self.data)
 
         if out is not None:
             out.fill(self.x)

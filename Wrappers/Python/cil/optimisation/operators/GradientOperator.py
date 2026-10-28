@@ -22,6 +22,7 @@ from cil.framework import BlockGeometry, ImageGeometry, cilacc
 import logging
 from cil.utilities.multiprocessing import NUM_THREADS
 import numpy as np
+import scipy.fft
 
 NEUMANN = 'Neumann'
 PERIODIC = 'Periodic'
@@ -45,7 +46,8 @@ class GradientOperator(LinearOperator):
     method: str, default 'forward'
         Accepts: 'forward', 'backward', 'centered', note C++ optimised routine only works with 'forward'
     bnd_cond: str, default,  'Neumann'
-        Set the boundary conditions to use 'Neumann' or 'Periodic'
+        Set the boundary conditions to use 'Neumann' or 'Periodic'. Under
+        forward differences the operator has a spectral :meth:`inverse`.
     **kwargs:
         correlation: str, default 'Space'
             'Space' will compute the gradient on only the spatial dimensions, 'SpaceChannels' will include the channel dimension direction
@@ -98,6 +100,9 @@ class GradientOperator(LinearOperator):
         if not hasattr(domain_geometry, 'dimension_labels'):
             domain_geometry.dimension_labels = [None]*len(domain_geometry.shape)
 
+        self.method = method
+        self.bnd_cond = bnd_cond
+
         if backend == C:
             if self.correlation == CORRELATION_SPACE and domain_geometry.channels > 1:
                 backend = NUMPY
@@ -115,6 +120,14 @@ class GradientOperator(LinearOperator):
 
         super(GradientOperator, self).__init__(domain_geometry=domain_geometry,
                                        range_geometry=self.operator.range_geometry())
+
+        # the differentiated axes and their voxel sizes
+        self._axes = list(self.operator.ind)
+        spacing = getattr(domain_geometry, 'spacing',
+                          [1] * len(domain_geometry.shape))
+        self._spacing = [spacing[axis] for axis in self._axes]
+        self.num_threads = kwargs.get('num_threads', NUM_THREADS)
+        self._spectral = None
 
 
     def direct(self, x, out=None):
@@ -154,6 +167,94 @@ class GradientOperator(LinearOperator):
 
         return self.operator.adjoint(x, out=out)
 
+    def has_inverse(self):
+        """True for forward differences under 'Neumann' or 'Periodic'
+        boundary conditions, which carry a spectral :meth:`inverse`."""
+        return (self.method == 'forward'
+                and self.bnd_cond in (NEUMANN, PERIODIC)
+                and not getattr(self.operator, 'split', False))
+
+    def inverse(self, x, out=None):
+        r"""
+        The Moore-Penrose pseudoinverse :math:`\nabla^+ =
+        (\nabla^T\nabla)^+\nabla^T`. The null space of the gradient is the
+        constants (per channel under ``correlation='Space'``, see
+        :meth:`null_space`), so :math:`\nabla^+\nabla u` is :math:`u` with
+        its mean removed.
+
+        Parameters
+        ----------
+        x : BlockDataContainer
+            Element in the range of the operator.
+        out : ImageData, optional
+            pre-allocated output memory to store result
+
+        Returns
+        -------
+        ImageData
+            result data if `out` not specified
+        """
+        out = self.adjoint(x, out=out)
+        out.fill(self._get_spectral().solve(out.as_array()))
+        return out
+
+    def inverse_adjoint(self, x, out=None):
+        r"""
+        The adjoint of :meth:`inverse`, :math:`\nabla(\nabla^T\nabla)^+`.
+
+        Parameters
+        ----------
+        x : ImageData
+            Element in the domain of the operator.
+        out : BlockDataContainer, optional
+            pre-allocated output memory to store result
+
+        Returns
+        -------
+        BlockDataContainer
+            result data if `out` not specified
+        """
+        smoothed = x.copy()
+        smoothed.fill(self._get_spectral().solve(x.as_array()))
+        return self.direct(smoothed, out=out)
+
+    def null_space(self):
+        """
+        A basis of the null space of the operator, as a list of
+        ImageData: the constants, one per channel when the channel axis is
+        not differentiated; empty when the gradient has no :meth:`inverse`.
+        """
+        if not self.has_inverse():
+            return []
+        geometry = self.domain_geometry()
+        shape = geometry.shape
+        free_axes = [axis for axis, size in enumerate(shape)
+                     if size > 1 and axis not in self._axes]
+        basis = []
+        for index in np.ndindex(*[shape[axis] for axis in free_axes]):
+            arr = np.zeros(shape, dtype=geometry.dtype)
+            sl = [slice(None)] * len(shape)
+            for axis, i in zip(free_axes, index):
+                sl[axis] = i
+            arr[tuple(sl)] = 1
+            element = geometry.allocate(None)
+            element.fill(arr)
+            basis.append(element)
+        return basis
+
+    def _get_spectral(self):
+        if not self.has_inverse():
+            raise NotImplementedError(
+                "inverse() needs forward differences with bnd_cond "
+                "'Neumann' or 'Periodic', got method={!r}, bnd_cond={!r}."
+                .format(self.method, self.bnd_cond))
+        if self._spectral is None:
+            self._spectral = _SpectralLaplacian(
+                self.domain_geometry().shape, self._axes, self._spacing,
+                self.bnd_cond, np.dtype(self.domain_geometry().dtype),
+                self.num_threads)
+        return self._spectral
+
 
     def calculate_norm(self):
 
@@ -181,6 +282,50 @@ class GradientOperator(LinearOperator):
         norm = 4 / (norm * norm)
 
         return np.sqrt(norm.sum())
+
+
+class _SpectralLaplacian:
+    r"""
+    Applies :math:`(\nabla^T\nabla)^+` for forward differences, with
+    eigenvalues :math:`\sum 4\sin^2(\pi k/(m n))/h^2` over the
+    differentiated axes: Neumann diagonalises in the DCT-II basis
+    (:math:`m = 2`), periodic in the Fourier basis (:math:`m = 1`), on real
+    data through ``rfftn``. The zero eigenvalue, the constants, is dropped.
+    """
+
+    def __init__(self, shape, axes, spacing, bnd_cond, dtype, workers):
+        self.shape = tuple(shape)
+        self.axes = tuple(axes)
+        self.bnd_cond = bnd_cond
+        self.workers = workers
+        ndim = len(shape)
+        period = 2.0 if bnd_cond == NEUMANN else 1.0
+        eigenvalues = 0
+        for i, (axis, h) in enumerate(zip(self.axes, spacing)):
+            n = shape[axis]
+            # rfftn keeps half the spectrum of its last axis
+            count = (n // 2 + 1 if bnd_cond == PERIODIC and i == len(axes) - 1
+                     else n)
+            k = np.arange(count).reshape([count if d == axis else 1
+                                          for d in range(ndim)])
+            eigenvalues = eigenvalues + (
+                4 * np.sin(np.pi * k / (period * n)) ** 2 / h ** 2)
+        with np.errstate(divide='ignore'):
+            reciprocal = np.where(eigenvalues > 0, 1.0 / eigenvalues, 0.0)
+        self.reciprocal = reciprocal.astype(dtype)
+
+    def solve(self, arr):
+        """Apply the pseudoinverse Laplacian to the array ``arr``."""
+        if self.bnd_cond == NEUMANN:
+            spectrum = scipy.fft.dctn(arr, type=2, axes=self.axes,
+                                      norm='ortho', workers=self.workers)
+            spectrum *= self.reciprocal
+            return scipy.fft.idctn(spectrum, type=2, axes=self.axes,
+                                   norm='ortho', workers=self.workers)
+        spectrum = scipy.fft.rfftn(arr, axes=self.axes, workers=self.workers)
+        spectrum *= self.reciprocal
+        return scipy.fft.irfftn(spectrum, s=[self.shape[a] for a in self.axes],
+                                axes=self.axes, workers=self.workers)
 
 
 class Gradient_numpy(LinearOperator):

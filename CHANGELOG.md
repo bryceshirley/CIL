@@ -10,6 +10,7 @@
     - `GenericFilteredBackProjection`'s `plot_filter` returns a `matplotlib.figure.Figure` instead of a `matplotlib.pyplot` (#2360)
     - `TransmissionAbsorptionConverter` supports `DataContainers` (#2372)
     - `LSQR` and `CGLS` accept `alpha`, `struct_operator` and `form` for generalised Tikhonov regularisation (#2369)
+    - `GradientOperator` with forward differences has an `inverse` and `inverse_adjoint` under Neumann and periodic boundary conditions
   - Documentation:
     -  Corrected the `LADMM` docstring and user guide: the objective is `f(x) + g(Kx)` (not `f(Kx) + g(x)`), with fixed iteration formulas and a note on its equivalence to `PDHG` (#2367)
   - Bug fixes:
