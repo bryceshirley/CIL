@@ -6,6 +6,7 @@
     - `IRLS` algorithm added to the CIL algorithm class, solving L1-regularised least squares by iterative reweighting, with an `IRLSEarlyStopping` callback (#2369)
     - `TikhonovOperator`, `BlockTikhonovOperator` and `WeightedOperator` added to the operators (#2369)
     - `DiagonalOperator` accepts a `BlockDataContainer` diagonal (#2369)
+    - `GCVHybridRule` and `DiscrepHybridRule` added to `cil.optimisation.utilities.hybrid` to select `alpha` in `LSQR` and `IRLS`
   - Enhancements:
     - `GenericFilteredBackProjection`'s `plot_filter` returns a `matplotlib.figure.Figure` instead of a `matplotlib.pyplot` (#2360)
     - `TransmissionAbsorptionConverter` supports `DataContainers` (#2372)

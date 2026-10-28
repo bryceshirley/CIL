@@ -21,8 +21,10 @@ from cil.optimisation.functions import L1Norm
 from cil.optimisation.operators import WeightedOperator
 from cil.optimisation.utilities.callbacks import (CGLSEarlyStopping,
                                                   IRLSEarlyStopping)
+from cil.optimisation.utilities.hybrid import HybridRule
 
 import logging
+import numpy as np
 import warnings
 
 log = logging.getLogger(__name__)
@@ -63,8 +65,11 @@ class IRLS(Algorithm):
         The forward model :math:`A`.
     data : DataContainer
         The measured data :math:`b`.
-    alpha : float
+    alpha : float or HybridRule
         The regularisation parameter :math:`\alpha`. Must be positive and non-zero. 
+        A :class:`~cil.optimisation.utilities.hybrid.HybridRule` instead selects
+        :math:`\alpha` each outer iteration, recorded in `selected_alphas`; the
+        outer loop then stops when the last three selections agree to the rule's `tol`.
     struct_operator : Operator, optional
         The structural operator :math:`L`. Defaults to ``None``, giving standard L1 regularisation.
     inner_solver : class, default LSQR
@@ -83,7 +88,7 @@ class IRLS(Algorithm):
         Iterations of the inner solver per outer iteration.
     warm_start : bool, default True
         Start every inner solve from the previous outer iterate. Set False to
-        restart every inner solve from scratch.
+        restart every inner solve from scratch. Ignored under a hybrid rule.
     tol : float, optional
         Attach an :class:`IRLSEarlyStopping` callback with this tolerance.
 
@@ -129,7 +134,14 @@ class IRLS(Algorithm):
                 "or inner_solver=CGLS; IRLS builds the solver itself. "
                 "Got an instance of {}.".format(type(inner_solver).__name__))
 
-        if alpha <= 0:
+        self.hybrid = isinstance(alpha, HybridRule)
+        self.selected_alphas = []
+        if self.hybrid:
+            if not hasattr(inner_solver, 'solve_at'):
+                raise ValueError(
+                    "A hybrid rule requires an inner solver with solve_at, "
+                    "got {}.".format(inner_solver.__name__))
+        elif alpha <= 0:
             raise ValueError(
                 "The regularisation parameter,  alpha,  must be positive, "
                 "got alpha = {}.".format(alpha))
@@ -142,7 +154,8 @@ class IRLS(Algorithm):
             initial=initial, operator=operator, data=data, alpha=alpha,
             struct_operator=self.weighted_operator, form=form)
 
-        if self.warm_start and not self.inner_solver.supports_warm_start:
+        if not self.hybrid and self.warm_start \
+                and not self.inner_solver.supports_warm_start:
             warnings.warn(
                 "{} in standard form cannot warm start: it damps the step "
                 "rather than the solution, so resuming from the previous "
@@ -185,15 +198,53 @@ class IRLS(Algorithm):
 
         solution = self.inner_solver.get_output(out=self.tmp_solution)
 
-        if self.warm_start:
+        if self.hybrid and not self.selected_alphas:
+            solution = self.inner_solver.initial
+        elif self.warm_start or self.hybrid:
             self.inner_solver.initial = solution
 
         # Calculate and inject new L1 weights based on that solution
         self._update_weights(solution)
 
+        if self.hybrid:
+            self.inner_solver._set_regalpha(0)
+
         self.inner_solver.initialise_variables()
         self.inner_solver.run(self.max_inner_iteration,
                               callbacks=self.inner_callbacks, verbose=0)
+
+        if self.hybrid:
+            self._solve_at_selection()
+
+    def _solve_at_selection(self):
+        """Realise the hybrid rule's selection, reusing the previous one if
+        the rule made none."""
+        rule = self.inner_solver.hybrid_rule
+        if not np.isfinite(rule.selected_alpha):
+            if not self.selected_alphas:
+                raise RuntimeError(
+                    "The hybrid rule made no selection in the first outer "
+                    "iteration; try increasing max_inner_iteration.")
+            rule.selected_alpha = self.selected_alphas[-1]
+            log.warning(
+                "The hybrid rule made no selection in outer iteration %d; "
+                "reusing the previous selection %.4e.", self.iteration,
+                rule.selected_alpha)
+        self.selected_alphas.append(float(rule.selected_alpha))
+        self.inner_solver.solve_at()
+        self._check_alpha_saturation()
+
+    def _check_alpha_saturation(self):
+        """Stop once the last three selections agree to the rule's `tol`."""
+        if len(self.selected_alphas) < 3:
+            return
+        rule = self.inner_solver.hybrid_rule
+        newest = self.selected_alphas[-1]
+        scale = abs(newest) + rule.EPS
+        if all(abs(a - newest) / scale < rule.tol
+               for a in self.selected_alphas[-3:]):
+            log.info("Hybrid selections saturated at %.4e", newest)
+            raise StopIteration
 
     def _update_weights(self, solution):
         """Update the diagonal L1 weights in-place from the previous outer

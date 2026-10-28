@@ -36,7 +36,8 @@ VALID_FORMS = ('block', 'standard')
 
 
 def _build_tikhonov_operator(operator, struct_operator=None, regalpha=0.0,
-                             form='block', solution_geometry=None):
+                             form='block', solution_geometry=None,
+                             hybrid=False):
     r"""Builds the operator :math:`K` a Krylov solver iterates on for the generalised Tikhonov problem :math:`\min_u \|Au - b\|_2^2 + \alpha^2 \|Lu\|_2^2`.
     Private: LSQR and CGLS call this from ``set_up``.
 
@@ -56,6 +57,9 @@ def _build_tikhonov_operator(operator, struct_operator=None, regalpha=0.0,
         an invertible :math:`L`, and LSQR cannot warm start in it.
     solution_geometry: cil geometry, default None
         The physical solution space. Defaults to ``operator.domain_geometry()``.
+    hybrid: bool, default False
+        A hybrid rule selects :math:`\alpha` during the solve: always build the
+        standard form, even at ``regalpha == 0``.
 
     Returns
     -------
@@ -71,6 +75,14 @@ def _build_tikhonov_operator(operator, struct_operator=None, regalpha=0.0,
 
     if solution_geometry is None:
         solution_geometry = operator.domain_geometry()
+
+    if hybrid:
+        return TikhonovOperator(
+            operator,
+            solution_geometry,
+            struct_operator=struct_operator,
+            regalpha=regalpha,
+        )
 
     if regalpha == 0:
         return operator

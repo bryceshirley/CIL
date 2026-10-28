@@ -24,6 +24,8 @@ from cil.optimisation.operators.TikhonovOperator import (
     TikhonovOperator,
     _build_tikhonov_operator,
 )
+from cil.optimisation.operators import WeightedOperator
+from cil.optimisation.utilities.hybrid import HybridRule
 import numpy
 import logging
 import warnings
@@ -120,24 +122,34 @@ class LSQR(Algorithm):
         initial : DataContainer, optional
             Initial guess for the solution. When `alpha` is non-zero it also sets the point the
             penalty is applied relative to, see the note in the class documentation.
+            In a hybrid run only the realisation starts from it.
         operator : Operator
             Linear operator representing the forward model.
         data : DataContainer
             Measured data.
-        alpha : float, optional
-            Regularisation parameter. Default is 0 (no regularisation).
+        alpha : float or HybridRule, optional
+            Regularisation parameter, default 0. A hybrid rule as `alpha`
+            makes the run hybrid: standard form regardless of `form`, an
+            unregularised first pass driving the rule each iteration,
+            and :meth:`solve_at` realising the selection.
         struct_operator : Operator, optional
             Structured operator for regularisation.
         form : {'block', 'standard'}, default 'block'
-            Which formulation of the regularised problem to iterate on. See
-            the class documentation.
+            Which formulation to iterate on, see the class documentation.
+            Ignored for a hybrid run, which needs the standard form.
         """
 
         super(LSQR, self).__init__(**kwargs)
 
         if initial is None and operator is not None:
             initial = operator.domain_geometry().allocate(0)
-        self.regalpha = alpha
+
+        if isinstance(alpha, HybridRule):
+            self.hybrid_rule = alpha
+            self.regalpha = 0
+        else:
+            self.hybrid_rule = None
+            self.regalpha = alpha
 
         if initial is not None and operator is not None and data is not None:
             self.set_up(initial=initial, operator=operator, data=data,
@@ -146,12 +158,18 @@ class LSQR(Algorithm):
             raise ValueError(
                 ' You must initialise LSQR with an `operator` and `data`')
 
+    @property
+    def hybrid(self):
+        """True when ``alpha`` was given as a hybrid rule rather than a number."""
+        return self.hybrid_rule is not None
+
     def set_up(self, initial, operator, data, struct_operator=None,
                form='block'):
         """
         Set up the LSQR algorithm with the problem definition.
 
-        Allocates the entire workspace; nothing allocates afterwards.
+        Allocates the entire workspace; nothing allocates afterwards,
+        except the block-form solver :meth:`solve_at` builds on first need.
 
         Parameters
         ----------
@@ -165,20 +183,21 @@ class LSQR(Algorithm):
         struct_operator : Operator, optional
             Structured operator for regularisation.
         form : {'block', 'standard'}, default 'block'
-            Which formulation to iterate on.
+            Which formulation to iterate on. Ignored for a hybrid run.
         """
         log.info("%s setting up", self.__class__.__name__)
 
         self.operator = _build_tikhonov_operator(
             operator, struct_operator=struct_operator,
-            regalpha=self.regalpha, form=form)
+            regalpha=self.regalpha, form=form, hybrid=self.hybrid)
 
         # The operator's class records which form was built; alpha == 0
         # leaves the bare operator and both flags False.
         self.standard_form = isinstance(self.operator, TikhonovOperator)
         self.block_form = isinstance(self.operator, BlockTikhonovOperator)
 
-        if self.standard_form and initial is not None and initial.norm() > 0:
+        if (self.standard_form and not self.hybrid
+                and initial is not None and initial.norm() > 0):
             warnings.warn(
                 "LSQR in standard form with a non-zero `initial` minimises "
                 "||A(x0 + d) - b||^2 + alpha^2 ||W L d||^2: the penalty applies "
@@ -209,6 +228,11 @@ class LSQR(Algorithm):
             self.u = data.copy()
         self.tmp_range = self.u.copy()
 
+        # Hybrid realisation state, see solve_at
+        self._realised = False
+        self._pass_budget = None
+        self.rebuild_solver = None
+
         self.initialise_variables()
 
         self.configured = True
@@ -226,6 +250,77 @@ class LSQR(Algorithm):
             return self.operator.solution_geometry()
         return self.operator.domain_geometry()
 
+    def run(self, iterations=None, callbacks=None, verbose=1):
+        """
+        As :meth:`Algorithm.run`; the last requested budget is also the
+        realisation budget of :meth:`solve_at`.
+        """
+        if numpy.isfinite(iterations):
+            self._pass_budget = int(iterations)
+        return super(LSQR, self).run(iterations, callbacks=callbacks,
+                                     verbose=verbose)
+
+    def solve_at(self):
+        """
+        Solve the regularised problem at the hybrid rule's selected alpha.
+
+        The solve runs for the budget of the last :meth:`run`, warm from a
+        non-zero `initial` in block form, otherwise in standard form.
+
+        Returns
+        -------
+        DataContainer
+            The solution, via :meth:`get_output`.
+        """
+        if self.hybrid_rule is None:
+            raise ValueError("solve_at requires alpha to be a hybrid rule.")
+        rule = self.hybrid_rule
+        regalpha = rule.selected_alpha
+        if not numpy.isfinite(regalpha):
+            raise ValueError("The hybrid rule has not selected an alpha yet.")
+
+        if rule.mode == 'match':
+            # Realise over the iterations the exploratory pass used
+            budget = len(rule.history.gkb_alphas) - 1
+        else:
+            budget = self._pass_budget or (len(rule.history.gkb_alphas) - 1)
+        log.debug("Realising selection %.4e over a %d-iteration budget.",
+                 regalpha, budget)
+
+        self._set_regalpha(regalpha)
+        start = self.initial
+        if start is not None and start.norm() > 0:
+            if self.rebuild_solver is None:
+                self.rebuild_solver = LSQR(
+                    operator=self.operator.operator, data=self.data,
+                    alpha=regalpha,
+                    struct_operator=self.operator.struct_operator,
+                    form='block')
+            rebuild = self.rebuild_solver
+            rebuild._set_regalpha(regalpha)
+            rebuild.initial = start
+            rebuild.initialise_variables()
+            rebuild.run(budget, verbose=0)
+            self.operator.map_from_solution(rebuild.get_output(),
+                                            out=self.x)
+            self._pass_iterations = budget
+        else:
+            self.initialise_variables()
+            for _ in range(budget):
+                try:
+                    self.update()
+                except StopIteration:
+                    break
+
+        self._realised = True
+        return self.get_output()
+
+    def _set_regalpha(self, regalpha):
+        """Set the regularisation parameter on the solver and its operator."""
+        self.regalpha = regalpha
+        if hasattr(self.operator, 'regalpha'):
+            self.operator.regalpha = regalpha
+
     def initialise_variables(self):
         """Initialise the variables of the algorithm. Allocates nothing."""
         # Catch self.regalpha and the operator's regalpha disagreeing.
@@ -237,7 +332,10 @@ class LSQR(Algorithm):
                     self.regalpha, operator_alpha))
 
         # Map initial guess to the solution space
-        if self.standard_form:
+        if self.hybrid_rule is not None and self.regalpha == 0:
+            # A hybrid exploratory pass always starts from zero
+            WeightedOperator._fill_in_place(self.x, 0)
+        elif self.standard_form:
             # Standard form operates in structure space: x_0 = L * u_0
             self.operator.map_from_solution(self.initial, out=self.x)
         else:
@@ -268,6 +366,8 @@ class LSQR(Algorithm):
         if self.alpha > 0:
             self.v /= self.alpha
 
+        self._pass_iterations = 0
+
         self.rhobar = self.alpha
         self.phibar = self.beta
         self.normr = self.beta
@@ -276,8 +376,14 @@ class LSQR(Algorithm):
 
         self.d.fill(self.v)
 
+        if self.hybrid_rule is not None and self.regalpha == 0:
+            self.hybrid_rule.seed(self)
+
     def update(self):
         """Perform a single iteration of the LSQR algorithm."""
+        self._realised = False
+        self._pass_iterations += 1
+
         # Update u in GKB
         self.operator.direct(self.v, out=self.tmp_range)
         self.tmp_range.sapyb(1.,  self.u, -self.alpha, out=self.u)
@@ -331,6 +437,9 @@ class LSQR(Algorithm):
         self.res2 += psi ** 2
         self.normr = math.sqrt(self.phibar ** 2 + self.res2)
 
+        if self.hybrid_rule is not None and self.regalphasq == 0:
+            self.hybrid_rule.step(self)
+
     def update_objective(self):
         """
         Update the objective function value (residual norm squared).
@@ -355,7 +464,16 @@ class LSQR(Algorithm):
             Current estimate of the solution. With ``out=None``, standard form
             returns a freshly mapped container; block form returns the live
             iterate, not a copy.
+
+        Note
+        ----
+        A hybrid solver returns the realised selection, see :meth:`solve_at`.
         """
+        rule = self.hybrid_rule
+        if (rule is not None and not self._realised
+                and numpy.isfinite(rule.selected_alpha)):
+            self.solve_at()
+
         if self.standard_form:
             return self.operator.map_to_solution(self.x, out=out,
                                                  data=self.data)
